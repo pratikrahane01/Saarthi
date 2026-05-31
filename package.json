@@ -9,13 +9,15 @@
   "categories": [
     "Other"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
       {
-        "command": "zero-magic.helloWorld",
-        "title": "Hello World"
+        "command": "zeroMagic.triggerSocraticHelp",
+        "title": "Help me think (Zero-Magic)"
       }
     ]
   },
