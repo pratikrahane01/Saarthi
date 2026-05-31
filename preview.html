@@ -1,0 +1,708 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Zero-Magic Extension Preview Simulator</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-dark: #121318;
+            --bg-editor: #181920;
+            --bg-sidebar: #1e2029;
+            --bg-panel: #242733;
+            --accent-blue: #3b82f6;
+            --accent-blue-hover: #60a5fa;
+            --accent-yellow: #eab308;
+            --text-main: #e2e8f0;
+            --text-muted: #94a3b8;
+            --error-red: #ef4444;
+            --border-color: #2e3244;
+            --radius-main: 12px;
+            --font-editor: 'Fira Code', monospace;
+            --font-ui: 'Inter', sans-serif;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: var(--font-ui);
+            user-select: none;
+        }
+
+        body {
+            background-color: var(--bg-dark);
+            color: var(--text-main);
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            overflow: hidden;
+        }
+
+        /* Simulator Container */
+        .vs-container {
+            width: 1000px;
+            height: 600px;
+            background-color: var(--bg-editor);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-main);
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            position: relative;
+        }
+
+        /* Title Bar */
+        .title-bar {
+            height: 36px;
+            background-color: var(--bg-sidebar);
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 16px;
+        }
+
+        .window-controls {
+            display: flex;
+            gap: 8px;
+        }
+
+        .window-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+        }
+
+        .dot-red { background-color: #ff5f56; }
+        .dot-yellow { background-color: #ffbd2e; }
+        .dot-green { background-color: #27c93f; }
+
+        .window-title {
+            font-size: 12px;
+            color: var(--text-muted);
+            font-weight: 500;
+        }
+
+        /* Main Workspace Layout */
+        .workspace {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+            position: relative;
+        }
+
+        /* Sidebar File Tree */
+        .sidebar {
+            width: 220px;
+            background-color: var(--bg-sidebar);
+            border-right: 1px solid var(--border-color);
+            display: flex;
+            flex-direction: column;
+            padding: 16px 0;
+        }
+
+        .sidebar-header {
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: var(--text-muted);
+            padding: 0 16px 12px 16px;
+            font-weight: 600;
+        }
+
+        .file-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 16px;
+            font-size: 13px;
+            color: var(--text-muted);
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .file-item.active {
+            background-color: rgba(59, 130, 246, 0.1);
+            color: var(--text-main);
+            border-left: 2px solid var(--accent-blue);
+        }
+
+        .file-item:hover:not(.active) {
+            background-color: rgba(255, 255, 255, 0.05);
+            color: var(--text-main);
+        }
+
+        /* Code Editor Window */
+        .editor-window {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            background-color: var(--bg-editor);
+            position: relative;
+        }
+
+        /* Editor Tabs */
+        .editor-tabs {
+            height: 35px;
+            background-color: var(--bg-sidebar);
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+        }
+
+        .tab {
+            height: 100%;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 0 16px;
+            font-size: 12px;
+            color: var(--text-muted);
+            background-color: var(--bg-editor);
+            border-right: 1px solid var(--border-color);
+            border-top: 2px solid var(--accent-blue);
+        }
+
+        /* Code Content */
+        .editor-content {
+            flex: 1;
+            padding: 24px;
+            font-family: var(--font-editor);
+            font-size: 14px;
+            line-height: 1.6;
+            color: #d1d5db;
+            position: relative;
+        }
+
+        .line {
+            display: flex;
+            align-items: center;
+            position: relative;
+        }
+
+        .line-num {
+            width: 32px;
+            color: #4b5563;
+            text-align: right;
+            margin-right: 16px;
+            font-size: 12px;
+        }
+
+        .code-keyword { color: #f472b6; }
+        .code-def { color: #60a5fa; }
+        .code-name { color: #fbbf24; }
+
+        /* Error Squiggle */
+        .error-squiggle {
+            position: relative;
+            cursor: pointer;
+        }
+
+        .error-squiggle::after {
+            content: '';
+            position: absolute;
+            left: 0;
+            bottom: -2px;
+            width: 100%;
+            height: 3px;
+            background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='6' height='3' viewBox='0 0 6 3'%3E%3Cpath d='M0 2.5 L1.5 0 L3 2.5 L4.5 0 L6 2.5' fill='none' stroke='%23ef4444' stroke-width='1.2'/%3E%3C/svg%3E") repeat-x;
+        }
+
+        /* Lightbulb Action Icon */
+        .lightbulb-icon {
+            position: absolute;
+            left: -12px;
+            top: 2px;
+            width: 20px;
+            height: 20px;
+            background-color: #272935;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            cursor: pointer;
+            opacity: 0;
+            transform: scale(0.8);
+            transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+            z-index: 10;
+        }
+
+        .lightbulb-icon.show {
+            opacity: 1;
+            transform: scale(1);
+        }
+
+        .lightbulb-icon svg {
+            width: 12px;
+            height: 12px;
+            fill: var(--accent-yellow);
+        }
+
+        /* Quick Fix Menu */
+        .quickfix-menu {
+            position: absolute;
+            left: -12px;
+            top: 26px;
+            width: 260px;
+            background-color: var(--bg-panel);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.4);
+            display: none;
+            flex-direction: column;
+            padding: 4px 0;
+            z-index: 100;
+        }
+
+        .quickfix-item {
+            padding: 8px 12px;
+            font-size: 13px;
+            color: var(--text-main);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            transition: background-color 0.2s;
+        }
+
+        .quickfix-item:hover {
+            background-color: var(--accent-blue);
+        }
+
+        /* Socratic Dashboard Sidebar (Right) */
+        .socratic-sidebar {
+            width: 320px;
+            background-color: var(--bg-panel);
+            border-left: 1px solid var(--border-color);
+            transform: translateX(100%);
+            transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+            display: flex;
+            flex-direction: column;
+            position: absolute;
+            right: 0;
+            top: 0;
+            bottom: 0;
+            z-index: 20;
+        }
+
+        .socratic-sidebar.open {
+            transform: translateX(0);
+        }
+
+        .sidebar-title {
+            padding: 16px;
+            font-size: 14px;
+            font-weight: 600;
+            border-bottom: 1px solid var(--border-color);
+            color: var(--text-main);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .sidebar-scroll {
+            flex: 1;
+            overflow-y: auto;
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .mission-badge {
+            align-self: flex-start;
+            padding: 4px 8px;
+            background-color: rgba(234, 179, 8, 0.1);
+            border: 1px solid var(--accent-yellow);
+            color: var(--accent-yellow);
+            border-radius: 4px;
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .mission-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--text-main);
+            line-height: 1.3;
+        }
+
+        .mission-desc {
+            font-size: 13px;
+            color: var(--text-muted);
+            line-height: 1.5;
+        }
+
+        .card {
+            background-color: var(--bg-editor);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 14px;
+        }
+
+        .card-header {
+            font-size: 12px;
+            color: var(--accent-blue);
+            font-weight: 600;
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .socratic-question {
+            font-size: 14px;
+            font-weight: 500;
+            line-height: 1.5;
+            color: var(--text-main);
+        }
+
+        .hint-item {
+            font-size: 13px;
+            color: var(--text-muted);
+            margin-left: 16px;
+            line-height: 1.5;
+            margin-top: 6px;
+        }
+
+        /* Progress Toast notification (Bottom Right) */
+        .toast-notification {
+            position: absolute;
+            right: 16px;
+            bottom: 30px;
+            width: 320px;
+            background-color: var(--bg-panel);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+            padding: 16px;
+            display: none;
+            flex-direction: column;
+            gap: 12px;
+            z-index: 200;
+            animation: slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+        }
+
+        @keyframes slideUp {
+            from { transform: translateY(50px); opacity: 0; }
+            to { transform: translateY(0); opacity: 1; }
+        }
+
+        .toast-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-main);
+        }
+
+        .toast-loader {
+            width: 14px;
+            height: 14px;
+            border: 2px solid rgba(255, 255, 255, 0.1);
+            border-top: 2px solid var(--accent-blue);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .toast-msg {
+            font-size: 12px;
+            color: var(--text-muted);
+        }
+
+        .progress-bar-container {
+            width: 100%;
+            height: 4px;
+            background-color: rgba(255, 255, 255, 0.1);
+            border-radius: 2px;
+            overflow: hidden;
+        }
+
+        .progress-bar-fill {
+            width: 0%;
+            height: 100%;
+            background-color: var(--accent-blue);
+            transition: width 1.5s linear;
+        }
+
+        /* Status Bar */
+        .status-bar {
+            height: 24px;
+            background-color: var(--accent-blue);
+            display: flex;
+            align-items: center;
+            padding: 0 12px;
+            font-size: 11px;
+            color: white;
+            font-weight: 500;
+        }
+
+        /* Start Overlay */
+        .overlay-instruction {
+            position: absolute;
+            inset: 0;
+            background-color: rgba(18, 19, 24, 0.85);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            z-index: 500;
+            backdrop-filter: blur(4px);
+            transition: opacity 0.4s;
+        }
+
+        .overlay-title {
+            font-size: 24px;
+            font-weight: 600;
+            margin-bottom: 12px;
+        }
+
+        .overlay-btn {
+            padding: 12px 24px;
+            background-color: var(--accent-blue);
+            border: none;
+            color: white;
+            font-size: 14px;
+            font-weight: 600;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+            margin-top: 16px;
+            box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
+        }
+
+        .overlay-btn:hover {
+            background-color: var(--accent-blue-hover);
+        }
+    </style>
+</head>
+<body>
+
+    <div class="vs-container">
+        <!-- Start Simulation Overlay -->
+        <div class="overlay-instruction" id="overlay">
+            <h2 class="overlay-title">Zero-Magic extension Simulator</h2>
+            <p style="color: var(--text-muted); max-width: 400px; font-size: 14px;">This interactive simulator demonstrates Phase 2: Intercepting diagnostic compiler errors, loading matching status, and executing the Socratic Dashboard hand-off.</p>
+            <button class="overlay-btn" id="start-btn">Start Simulation</button>
+        </div>
+
+        <!-- VS Code Title Bar -->
+        <div class="title-bar">
+            <div class="window-controls">
+                <div class="window-dot dot-red"></div>
+                <div class="window-dot dot-yellow"></div>
+                <div class="window-dot dot-green"></div>
+            </div>
+            <div class="window-title">test.py - Socrates - [Extension Development Host]</div>
+            <div style="width: 52px;"></div>
+        </div>
+
+        <!-- Main Workspace -->
+        <div class="workspace">
+            <!-- Sidebar File Tree -->
+            <div class="sidebar">
+                <div class="sidebar-header">Explorer</div>
+                <div class="file-item">
+                    <svg width="14" height="14" fill="var(--text-muted)" viewBox="0 0 16 16"><path d="M2 2a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2zm2-1a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1z"/></svg>
+                    src/extension.ts
+                </div>
+                <div class="file-item">
+                    <svg width="14" height="14" fill="var(--text-muted)" viewBox="0 0 16 16"><path d="M2 2a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2zm2-1a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1z"/></svg>
+                    src/watcher.ts
+                </div>
+                <div class="file-item">
+                    <svg width="14" height="14" fill="var(--text-muted)" viewBox="0 0 16 16"><path d="M2 2a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2zm2-1a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1z"/></svg>
+                    src/missions.ts
+                </div>
+                <div class="file-item active">
+                    <svg width="14" height="14" fill="#60a5fa" viewBox="0 0 16 16"><path d="M2 2a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2zm2-1a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1z"/></svg>
+                    test.py
+                </div>
+            </div>
+
+            <!-- Editor window -->
+            <div class="editor-window">
+                <div class="editor-tabs">
+                    <div class="tab">test.py</div>
+                </div>
+                
+                <div class="editor-content" id="editor-body">
+                    <!-- Line 1 -->
+                    <div class="line" style="margin-bottom: 4px;">
+                        <span class="line-num">1</span>
+                        <span><span class="code-keyword">def</span> <span class="code-def">calculate_sum</span>(a, b)<span class="error-squiggle" id="error-word"></span></span>
+                        
+                        <!-- Lightbulb Action Launcher -->
+                        <div class="lightbulb-icon" id="lightbulb" title="Show Code Actions (Ctrl+.)">
+                            <svg viewBox="0 0 24 24">
+                                <path d="M12 2C8.13 2 5 5.13 5 9c0 2.38 1.19 4.47 3 5.74V17c0 .55.45 1 1 1h6c.55 0 1-.45 1-1v-2.26c1.81-1.27 3-3.36 3-5.74 0-3.87-3.13-7-7-7zm2.85 11.1l-.85.6V16h-4v-2.3l-.85-.6C7.8 12.16 7 10.63 7 9c0-2.76 2.24-5 5-5s5 2.24 5 5c0 1.63-.8 3.16-2.15 4.1zM9 19h6v1H9v-1zm1 2h4v1h-4v-1z"/>
+                            </svg>
+                        </div>
+
+                        <!-- Dropdown Menu -->
+                        <div class="quickfix-menu" id="quickfix-menu">
+                            <div class="quickfix-item" id="trigger-action">
+                                <span>💡</span>
+                                <strong>Help me think (Zero-Magic)</strong>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Line 2 -->
+                    <div class="line">
+                        <span class="line-num">2</span>
+                        <span style="padding-left: 28px;"><span class="code-keyword">return</span> a + b</span>
+                    </div>
+                </div>
+
+                <!-- Toast Loader Status Notification (Progress Bar) -->
+                <div class="toast-notification" id="toast">
+                    <div class="toast-header">
+                        <div class="toast-loader"></div>
+                        <span>Zero-Magic Engine</span>
+                    </div>
+                    <div class="toast-msg" id="toast-msg">Analyzing error context...</div>
+                    <div class="progress-bar-container">
+                        <div class="progress-bar-fill" id="progress-fill"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Socratic Dashboard Sidebar (Pops in) -->
+            <div class="socratic-sidebar" id="socratic-dashboard">
+                <div class="sidebar-title">
+                    <span>💡</span> Zero-Magic Socratic Help
+                </div>
+                <div class="sidebar-scroll">
+                    <div class="mission-badge">Python Mission</div>
+                    <div class="mission-title" id="m-title">Variable Initialization Mastery</div>
+                    <div class="mission-desc" id="m-desc">You used a variable name before assigning a value to it.</div>
+                    
+                    <div class="card">
+                        <div class="card-header">Socratic Challenge</div>
+                        <div class="socratic-question" id="m-question">Before a computer can read what is inside a box, what must you do to that box first?</div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">Socratic Hints</div>
+                        <ul style="list-style: none;" id="m-hints">
+                            <li class="hint-item">• Look at the left-hand side of your code.</li>
+                            <li class="hint-item">• Did you spell the variable name exactly the same way?</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Status Bar -->
+        <div class="status-bar" id="statusBar">
+            <div>✓ Zero-Magic Active</div>
+        </div>
+    </div>
+
+    <script>
+        const overlay = document.getElementById('overlay');
+        const startBtn = document.getElementById('start-btn');
+        const errorWord = document.getElementById('error-word');
+        const lightbulb = document.getElementById('lightbulb');
+        const quickfixMenu = document.getElementById('quickfix-menu');
+        const triggerAction = document.getElementById('trigger-action');
+        const toast = document.getElementById('toast');
+        const toastMsg = document.getElementById('toast-msg');
+        const progressFill = document.getElementById('progress-fill');
+        const socraticDashboard = document.getElementById('socratic-dashboard');
+        const statusBar = document.getElementById('statusBar');
+
+        // Dynamic offline mission payload
+        const offlineMission = {
+            id: "py_name_error_01",
+            title: "Variable Initialization Mastery",
+            description: "You used a variable name before assigning a value to it.",
+            socraticQuestion: "Before a computer can read what is inside a box, what must you do to that box first?",
+            hints: [
+                "Look at the left-hand side of your code.",
+                "Did you spell the variable name exactly the same way?"
+            ]
+        };
+
+        // Start Simulator
+        startBtn.addEventListener('click', () => {
+            overlay.style.opacity = '0';
+            setTimeout(() => {
+                overlay.style.display = 'none';
+                // Trigger lightbulb show
+                setTimeout(() => {
+                    lightbulb.classList.add('show');
+                }, 1000);
+            }, 400);
+        });
+
+        // Toggle Quick Fix Menu on Lightbulb Click
+        lightbulb.addEventListener('click', (e) => {
+            e.stopPropagation();
+            quickfixMenu.style.display = quickfixMenu.style.display === 'flex' ? 'none' : 'flex';
+        });
+
+        // Click on Quick Fix Option -> Trigger Progress Loader -> Dashboard Hand-off
+        triggerAction.addEventListener('click', () => {
+            quickfixMenu.style.display = 'none';
+            lightbulb.classList.remove('show');
+            
+            // Show toast progress loading notification
+            toast.style.display = 'flex';
+            progressFill.style.width = '50%';
+            
+            // Step 1 status report: Analyzing
+            setTimeout(() => {
+                toastMsg.innerText = "Analyzing error context...";
+                progressFill.style.width = '70%';
+                
+                // Step 2 status report: Found! Handing off...
+                setTimeout(() => {
+                    toastMsg.innerText = "Socratic Mission Found! Handing off...";
+                    progressFill.style.width = '100%';
+                    statusBar.style.backgroundColor = '#10b981';
+                    statusBar.innerText = "✓ Socratic Mission Synced Successfully!";
+
+                    // Slide in Socratic Dashboard Sidebar!
+                    setTimeout(() => {
+                        toast.style.display = 'none';
+                        
+                        // Populate Socratic Dashboard details
+                        document.getElementById('m-title').innerText = offlineMission.title;
+                        document.getElementById('m-desc').innerText = offlineMission.description;
+                        document.getElementById('m-question').innerText = offlineMission.socraticQuestion;
+                        
+                        const hintsContainer = document.getElementById('m-hints');
+                        hintsContainer.innerHTML = '';
+                        offlineMission.hints.forEach(hint => {
+                            const li = document.createElement('li');
+                            li.className = 'hint-item';
+                            li.innerText = `• ${hint}`;
+                            hintsContainer.appendChild(li);
+                        });
+
+                        socraticDashboard.classList.add('open');
+                    }, 800);
+                }, 1500);
+            }, 1000);
+        });
+
+        // Close dropdown when clicking editor
+        document.getElementById('editor-body').addEventListener('click', () => {
+            quickfixMenu.style.display = 'none';
+        });
+    </script>
+</body>
+</html>
