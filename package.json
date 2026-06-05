@@ -18,6 +18,10 @@
       {
         "command": "zeroMagic.triggerSocraticHelp",
         "title": "Help me think (Zero-Magic)"
+      },
+      {
+        "command": "zeroMagic.renderSocraticDashboard",
+        "title": "Zero-Magic: Render Dashboard"
       }
     ]
   },

@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { Mission } from './missions';
+import { SocraticDashboardPanel } from './ui/dashboard';
 
 export async function trigger(mission: Mission) {
     console.log(`Zero-Magic: Interceptor triggered for mission ${mission.id}`);
@@ -63,4 +64,38 @@ async function ensureGitIgnore(rootUri: vscode.Uri) {
         await vscode.workspace.fs.writeFile(gitIgnoreUri, Buffer.from(ignoreEntry, 'utf8'));
         console.log('Zero-Magic: Created .gitignore');
     }
+}
+
+export async function unlockMission(missionId: string, language: string) {
+    console.log(`Zero-Magic: Unlocking mission ${missionId}`);
+    
+    // 1. Delete hidden test file
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    if (!workspaceFolders || workspaceFolders.length === 0) return;
+    
+    const rootUri = workspaceFolders[0].uri;
+    const testDirUri = vscode.Uri.joinPath(rootUri, '.zero_magic', 'tests');
+    
+    let ext = '.txt';
+    if (language === 'python') ext = '.py';
+    else if (language === 'javascript') ext = '.js';
+    else if (language === 'typescript') ext = '.ts';
+    
+    const testFileName = `test_current${ext}`;
+    const testFileUri = vscode.Uri.joinPath(testDirUri, testFileName);
+    
+    try {
+        await vscode.workspace.fs.delete(testFileUri, { useTrash: false });
+        console.log(`Zero-Magic: Deleted test file ${testFileUri.fsPath}`);
+    } catch (err) {
+        console.error('Zero-Magic: Failed to delete test file', err);
+    }
+
+    // 2. Post UNLOCK message to webview
+    if (SocraticDashboardPanel.currentPanel) {
+        SocraticDashboardPanel.currentPanel.postMessage({ type: 'UNLOCK', missionId });
+    }
+
+    // 3. Show information message
+    vscode.window.showInformationMessage("✓ Milestone unlocked. Well done.");
 }
