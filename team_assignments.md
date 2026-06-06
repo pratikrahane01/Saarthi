@@ -16,11 +16,11 @@ Here is the 14-day build plan divided logically across 4 teammates. The division
   - [ ] Implement `interceptor.ts` triggered by the Quick Fix Code Action.
   - [ ] Use `vscode.workspace.fs` to safely write hidden test files to `.zero_magic/tests/`.
   - [ ] Ensure `.gitignore` is updated automatically.
-- [ ] **Phase 6: The Unlock Flow (Day 9)**
-  - [ ] Build the cleanup sequence when tests pass.
-  - [ ] Delete the hidden test file.
-  - [ ] Post `{ type: 'UNLOCK', missionId }` to the webview to show a success state.
-  - [ ] Show VS Code `information message` ("✓ Milestone unlocked. Well done.").
+- [x] **Phase 6: The Unlock Flow (Day 9)**
+  - [x] Build the cleanup sequence when tests pass.
+  - [x] Delete the hidden test file.
+  - [x] Post `{ type: 'UNLOCK', missionId }` to the webview to show a success state.
+  - [x] Show VS Code `information message` ("✓ Milestone unlocked. Well done.").
 - [ ] **Phase 10: Submission Lead (Day 14)**
   - [ ] Package the extension using `vsce package` into a `.vsix` file.
   - [ ] Finalize the README and architecture diagrams.
@@ -65,11 +65,11 @@ Here is the 14-day build plan divided logically across 4 teammates. The division
 ## 🎨 Teammate 4: UI, Content & Demo (The Face)
 **Focus:** The webview sidebar, mission content generation, and presentation polish.
 
-- [ ] **Phase 5: The Socratic Dashboard (Day 7-8)**
-  - [ ] Create the Webview sidebar (`ui/sidebar.ts` & `webview/index.html`).
-  - [ ] Implement UI states: IDLE, QUESTIONING, HINTING, PASSED, FAILED.
-  - [ ] Implement Socratic dialogue: explain concepts, ask questions, provide hints (no direct code).
-  - [ ] Implement 2-way message passing (`postMessage`) between VS Code and the Webview.
+- [x] **Phase 5: The Socratic Dashboard (Day 7-8)**
+  - [x] Create the Webview sidebar (`ui/sidebar.ts` & `webview/index.html`).
+  - [x] Implement UI states: IDLE, QUESTIONING, HINTING, PASSED, FAILED.
+  - [x] Implement Socratic dialogue: explain concepts, ask questions, provide hints (no direct code).
+  - [x] Implement 2-way message passing (`postMessage`) between VS Code and the Webview.
 - [ ] **Phase 7: Backend Mission Generation (Day 10)**
   - [ ] Write FastAPI endpoints to handle mission generation via Codex/LLM API.
   - [ ] Generate distinct missions (Python: NameError, TypeError, etc. / JS: undefined is not a function).

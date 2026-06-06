@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { DiagnosticEvent } from './watcher';
+import * as interceptor from './interceptor';
 
 // Define the Mission interface contract agreed upon with Teammate 4
 export interface Mission {
@@ -75,11 +76,11 @@ export async function matchErrorToMission(event: DiagnosticEvent): Promise<Missi
  */
 export async function executeMissionHandOff(mission: Mission) {
     try {
-        // Mocking Teammate 1's interceptor system hook for now
-        // In full integration, this imports and calls: interceptor.trigger(mission);
         console.log(`=== HAND-OFF TO TEAMMATE 1 ===`);
         console.log(`Injecting test files for: ${mission.title}`);
         console.log(`Targeting file environment: ${mission.targetFilename}`);
+        
+        await interceptor.trigger(mission);
         
         // Broadcast an internal custom event or command that Teammate 4's UI Webview can listen to
         await vscode.commands.executeCommand('zeroMagic.renderSocraticDashboard', mission);

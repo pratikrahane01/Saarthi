@@ -18,8 +18,30 @@
       {
         "command": "zeroMagic.triggerSocraticHelp",
         "title": "Help me think (Zero-Magic)"
+      },
+      {
+        "command": "zeroMagic.renderSocraticDashboard",
+        "title": "Zero-Magic: Render Dashboard"
       }
-    ]
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "zeroMagicSidebar",
+          "title": "Zero-Magic",
+          "icon": "$(lightbulb)"
+        }
+      ]
+    },
+    "views": {
+      "zeroMagicSidebar": [
+        {
+          "type": "webview",
+          "id": "zeroMagic.socraticSidebar",
+          "name": "Socratic Dashboard"
+        }
+      ]
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
