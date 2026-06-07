@@ -70,10 +70,10 @@ Here is the 14-day build plan divided logically across 4 teammates. The division
   - [x] Implement UI states: IDLE, QUESTIONING, HINTING, PASSED, FAILED.
   - [x] Implement Socratic dialogue: explain concepts, ask questions, provide hints (no direct code).
   - [x] Implement 2-way message passing (`postMessage`) between VS Code and the Webview.
-- [ ] **Phase 7: Backend Mission Generation (Day 10)**
-  - [ ] Write FastAPI endpoints to handle mission generation via Codex/LLM API.
-  - [ ] Generate distinct missions (Python: NameError, TypeError, etc. / JS: undefined is not a function).
-  - [ ] Ensure each mission has Socratic questions, hints, and a valid test payload.
+- [x] **Phase 7: Backend Mission Generation (Day 10)**
+  - [x] Write FastAPI endpoints to handle mission generation via Codex/LLM API.
+  - [x] Generate distinct missions (Python: NameError, TypeError, etc. / JS: undefined is not a function).
+  - [x] Ensure each mission has Socratic questions, hints, and a valid test payload.
 - [ ] **Phase 9: Demo Polish (Day 13)**
   - [ ] Add real-time "Attempts: N" counter to the sidebar.
   - [ ] Add a `DEMO MODE` flag to force a scripted sequence of missions for the pitch.
