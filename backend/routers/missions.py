@@ -28,11 +28,12 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, status
 
-from backend.models import MissionRequest, MissionResponse
+from backend.models import MissionRequest, MissionResponse, SolutionRequest, SolutionResponse
 from backend.services import (
     lookup_mission,
     generate_hidden_test,
     enrich_mission,
+    groq_service,
 )
 from backend.services.mission_service import LookupStatus, MissionLookupError
 from backend.services.hidden_test_service import HiddenTestGenerationError
@@ -175,20 +176,31 @@ async def generate_mission(request_body: MissionRequest, request: Request) -> Mi
             hiddenTest=test_result.hidden_test,
         )
 
-    # ── Step 4: No static mission → 404 (LLM fallback is Phase 7 Step 6) ───
-    logger.warning(
-        "[%s] NOT_FOUND | language=%r  errorCode=%r — returning 404",
+    # ── Step 4: No static mission → Generate dynamic mission via Groq ───────
+    logger.info(
+        "[%s] NOT_FOUND in static repository — calling Groq for dynamic mission",
         request_id,
-        request_body.language,
-        request_body.errorCode,
     )
-    raise HTTPException(
-        status_code=status.HTTP_404_NOT_FOUND,
-        detail=(
-            f"No Socratic mission found for language={request_body.language!r} "
-            f"and errorCode={request_body.errorCode!r}. "
-            "LLM-based generation will be added in a future phase."
-        ),
+
+    dynamic_mission = groq_service.generate_dynamic_mission(
+        language=request_body.language,
+        error_code=request_body.errorCode,
+        message=request_body.message,
+    )
+
+    # Create a stable, safe missionId for the extension's file management
+    import re
+    raw_id = f"dynamic_{request_body.language}_{request_body.errorCode}"
+    mission_id = re.sub(r'[^a-z0-9_]', '_', raw_id.lower())
+
+    return MissionResponse(
+        missionId=mission_id,
+        title="Custom Socratic Mission",
+        concept=dynamic_mission.concept,
+        questions=dynamic_mission.questions,
+        hints=dynamic_mission.hints,
+        framework=test_result.framework,
+        hiddenTest=test_result.hidden_test,
     )
 
 
@@ -222,6 +234,39 @@ async def list_missions() -> dict[str, Any]:
             for m in missions
         ],
     }
+
+
+# ---------------------------------------------------------------------------
+# POST /v1/missions/reveal-solution
+# ---------------------------------------------------------------------------
+
+@router.post(
+    "/reveal-solution",
+    response_model=SolutionResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Generate an expert solution based on user's code and error",
+)
+async def reveal_solution(request_body: SolutionRequest, request: Request) -> SolutionResponse:
+    request_id = _request_id(request)
+    logger.info(
+        "[%s] POST /reveal-solution | language=%r  errorCode=%r",
+        request_id,
+        request_body.language,
+        request_body.errorCode,
+    )
+
+    result = groq_service.generate_expert_solution(
+        language=request_body.language,
+        error_code=request_body.errorCode,
+        source_code=request_body.sourceCode,
+        message=request_body.diagnosticMessage,
+    )
+
+    return SolutionResponse(
+        fixedCode=result.fixedCode,
+        explanation=result.explanation,
+        conceptSummary=result.conceptSummary
+    )
 
 
 # ---------------------------------------------------------------------------

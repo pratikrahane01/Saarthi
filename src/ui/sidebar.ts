@@ -1,11 +1,12 @@
 import * as vscode from 'vscode';
-import { Mission } from '../missions';
+import { Mission, fetchExpertSolution, SolutionRequest } from '../missions';
+import * as interceptor from '../interceptor';
 
 /**
- * The five possible UI states for the Socratic Dashboard.
+ * The six possible UI states for the Socratic Dashboard.
  * Each state maps to a distinct visual presentation in the webview.
  */
-export type DashboardState = 'IDLE' | 'QUESTIONING' | 'HINTING' | 'PASSED' | 'FAILED';
+export type DashboardState = 'IDLE' | 'QUESTIONING' | 'HINTING' | 'TESTING' | 'PASSED' | 'FAILED' | 'SOLUTION';
 
 export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
 
@@ -16,9 +17,16 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
 
     private _view?: vscode.WebviewView;
     private _currentState: DashboardState = 'IDLE';
+    private _isTesting: boolean = false;
     private _currentMission?: Mission;
     private _attempts: number = 0;
     private _revealedHints: number = 0;
+    private _customFailedMessage?: string;
+    private _expertSolution?: {
+        fixedCode: string;
+        explanation: string;
+        conceptSummary: string;
+    };
 
     constructor(private readonly _extensionUri: vscode.Uri) {
         SocraticSidebarProvider.instance = this;
@@ -74,12 +82,14 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
     /**
      * Called when the runner reports test results.
      */
-    public reportTestResult(passed: boolean) {
+    public reportTestResult(passed: boolean, customFailedMessage?: string) {
         this._attempts++;
         if (passed) {
             this._currentState = 'PASSED';
+            this._customFailedMessage = undefined;
         } else {
             this._currentState = 'FAILED';
+            this._customFailedMessage = customFailedMessage;
         }
         this._postState();
     }
@@ -92,6 +102,8 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
         this._currentMission = undefined;
         this._attempts = 0;
         this._revealedHints = 0;
+        this._customFailedMessage = undefined;
+        this._expertSolution = undefined;
         this._postState();
     }
 
@@ -109,18 +121,34 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
     private _handleWebviewMessage(message: any) {
         switch (message.type) {
             case 'REQUEST_HINT':
+                console.log("[EXTENSION] REQUEST_HINT received");
+                console.log("[DEBUG] currentState:", this._currentState);
+                console.log("[DEBUG] revealedHints:", this._revealedHints);
+                console.log("[DEBUG] mission.hints.length:", this._currentMission?.hints?.length);
                 this._onRequestHint();
                 break;
 
             case 'RETRY':
-                // User clicked "Try Again" from the FAILED screen
-                this._currentState = 'QUESTIONING';
-                this._postState();
+                // User clicked "Try Again" from the FAILED screen.
+                // Ignore duplicate clicks if a test is already actively running.
+                if (this._isTesting) {
+                    console.log('Zero-Magic Sidebar: Ignoring RETRY, test already running.');
+                    break;
+                }
+                this._retrigger();
                 break;
 
             case 'REQUEST_STATE':
                 // Webview is asking for the current state (e.g. on first load)
                 this._postState();
+                break;
+
+            case 'ABORT':
+                this._abortMission();
+                break;
+
+            case 'REQUEST_SOLUTION':
+                this._onRequestSolution();
                 break;
 
             default:
@@ -132,7 +160,8 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
      * Reveal the next hint in the Socratic sequence.
      */
     private _onRequestHint() {
-        if (!this._currentMission) return;
+        console.log("[EXTENSION] _onRequestHint executed");
+        if (!this._currentMission) { return; }
 
         if (this._revealedHints < this._currentMission.hints.length) {
             this._revealedHints++;
@@ -142,12 +171,140 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
         this._postState();
     }
 
+    private async _onRequestSolution() {
+        if (!this._currentMission) return;
+        
+        // Show loading state by transitioning to SOLUTION temporarily or keeping TESTING spinner logic
+        this._currentState = 'SOLUTION'; 
+        
+        // Find the text document
+        let sourceCode = '';
+        if (this._currentMission.targetUri) {
+            try {
+                const doc = await vscode.workspace.openTextDocument(vscode.Uri.parse(this._currentMission.targetUri));
+                sourceCode = doc.getText();
+            } catch (e) {
+                console.error("Could not read source code", e);
+            }
+        }
+
+        const request: SolutionRequest = {
+            language: this._currentMission.language,
+            errorCode: this._currentMission.originalErrorCode,
+            diagnosticMessage: this._currentMission.originalMessage,
+            sourceCode: sourceCode
+        };
+
+        const result = await fetchExpertSolution(request);
+        if (result) {
+            this._expertSolution = result;
+        } else {
+            this._expertSolution = {
+                fixedCode: "// Failed to load solution",
+                explanation: "There was a network error reaching the backend.",
+                conceptSummary: "Please check if the backend server is running."
+            };
+        }
+        
+        this._postState();
+    }
+
+    /**
+     * Re-run the hidden test for the current mission after a RETRY.
+     *
+     * Reuses interceptor.trigger() (Phase 3) and reportTestResult() (Phase 6)
+     * so there is zero duplication of test-execution or unlock logic.
+     * If the pass condition is now met, unlockMission() is called automatically
+     * from missions.ts#executeMissionHandOff — but since we are already past
+     * the hand-off here, we handle unlock directly to avoid a double render.
+     */
+    private async _retrigger() {
+        if (!this._currentMission || this._isTesting) {
+            console.warn('Zero-Magic Sidebar: Cannot retrigger. No mission or test already running.');
+            return;
+        }
+
+        this._isTesting = true;
+        this._currentState = 'TESTING';
+        this._postState();
+
+        const mission = this._currentMission;
+        console.log(`Zero-Magic Sidebar: Re-running test for mission "${mission.id}"`);
+        console.log("[ZERO-MAGIC] Test execution started");
+
+        let executionId: number | undefined;
+        try {
+            const result = await interceptor.trigger(mission);
+            executionId = result.executionId;
+
+            if (!interceptor.isLatestExecution(executionId)) {
+                console.log(`Zero-Magic Sidebar: Execution ${executionId} is stale. Ignoring.`);
+                return;
+            }
+
+            // --- Two-Factor Validation ---
+            let finalPassed = result.passed;
+            let twoFactorFailedMessage: string | undefined;
+
+            if (result.passed && mission.targetUri) {
+                const targetUri = vscode.Uri.parse(mission.targetUri);
+                const diagnostics = vscode.languages.getDiagnostics(targetUri);
+                
+                const hasOriginalError = diagnostics.some(d => 
+                    d.severity === vscode.DiagnosticSeverity.Error && 
+                    d.message === mission.originalMessage
+                );
+
+                if (hasOriginalError) {
+                    finalPassed = false;
+                    twoFactorFailedMessage = "You understood the concept, but the original error is still present. Apply the fix to your code and try again.";
+                    console.log(`Zero-Magic Sidebar: Two-factor failed. Original error still present.`);
+                }
+            }
+
+            // reportTestResult increments _attempts and drives PASSED / FAILED state.
+            this.reportTestResult(finalPassed, twoFactorFailedMessage);
+
+            // If the student finally passed, run the full unlock + cleanup flow.
+            if (finalPassed) {
+                await interceptor.unlockMission(mission.id, mission.language);
+            }
+        } catch (err) {
+            console.error('Zero-Magic Sidebar: Retrigger failed:', err);
+            vscode.window.setStatusBarMessage('⚠️ Zero-Magic: Test re-run failed.', 5000);
+            // Fall back to FAILED state so the student still sees something.
+            this._currentState = 'FAILED';
+            this._postState();
+        } finally {
+            if (executionId === undefined || interceptor.isLatestExecution(executionId)) {
+                this._isTesting = false;
+            }
+        }
+    }
+
+    /**
+     * Safely aborts the active mission, cancels any background test processing,
+     * deletes hidden files, and restores the UI to IDLE.
+     */
+    private async _abortMission() {
+        console.log('Zero-Magic Sidebar: Aborting mission.');
+        // 1. Cancel pending execution results (prevents UI lockups from stale background tests)
+        interceptor.invalidateAllExecutions();
+        // 2. Clear any active testing lock
+        this._isTesting = false;
+        // 3. Delete hidden test files
+        await interceptor.cleanUpAllTests();
+        // 4. Clear mission memory and return to IDLE
+        this.reset();
+    }
+
     // ──────────────────────────────────────────────
     //  OUTBOUND — push state to the webview
     // ──────────────────────────────────────────────
 
     private _postState() {
         if (!this._view) return;
+        console.log("[EXTENSION] Posting updated state");
 
         this._view.webview.postMessage({
             type: 'STATE_UPDATE',
@@ -163,6 +320,8 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             attempts: this._attempts,
             totalHints: this._currentMission?.hints.length ?? 0,
             revealedHints: this._revealedHints,
+            customFailedMessage: this._customFailedMessage,
+            expertSolution: this._expertSolution,
         });
     }
 
@@ -210,7 +369,7 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             height: 200%;
             background: radial-gradient(circle at 30% 20%, rgba(56, 189, 248, 0.04) 0%, transparent 50%),
                         radial-gradient(circle at 70% 80%, rgba(139, 92, 246, 0.04) 0%, transparent 50%);
-            z-index: 0;
+            z-index: -1;
             pointer-events: none;
         }
 
@@ -367,6 +526,21 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             to   { opacity: 1; transform: translateX(0); }
         }
 
+        /* ── Spinner ── */
+        .spinner {
+            display: inline-block;
+            width: 24px;
+            height: 24px;
+            border: 3px solid rgba(56,189,248,0.2);
+            border-top-color: #38bdf8;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
         /* ── Buttons ── */
         .btn {
             display: inline-flex;
@@ -400,6 +574,15 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             border: 1px solid rgba(56,189,248,0.2);
         }
         .btn-retry:hover { background: rgba(56,189,248,0.2); box-shadow: 0 0 20px rgba(56,189,248,0.1); }
+        .btn-retry:disabled { opacity: 0.35; cursor: not-allowed; }
+
+        .btn-abort {
+            background: rgba(244,63,94,0.08);
+            color: #f43f5e;
+            border: 1px solid rgba(244,63,94,0.15);
+            margin-top: 12px;
+        }
+        .btn-abort:hover { background: rgba(244,63,94,0.15); box-shadow: 0 0 20px rgba(244,63,94,0.1); }
 
         /* ── Attempts Counter ── */
         .attempts-bar {
@@ -569,10 +752,18 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
     <div class="app">
         <!-- Header (always visible) -->
         <div class="header">
+            <div style="color: #10b981; font-weight: bold; margin-bottom: 5px;">BUILD_ID_20260608</div>
             <div class="logo">Zero-Magic</div>
             <div class="badge badge-idle" id="state-badge">
                 <span class="badge-dot"></span>
                 <span id="badge-text">Idle</span>
+            </div>
+            
+            <!-- DEBUG PANEL -->
+            <div id="debug-panel" style="background: red; color: white; padding: 10px; margin-top: 10px; border-radius: 5px; font-family: monospace; font-size: 12px; text-align: left;">
+                <div>State: <span id="debug-state">N/A</span></div>
+                <div>Revealed Hints: <span id="debug-revealed">N/A</span></div>
+                <div>Total Hints: <span id="debug-total">N/A</span></div>
             </div>
         </div>
 
@@ -604,12 +795,14 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                     The Socratic Question
                 </div>
                 <p class="text-question" id="mission-question"></p>
+                <div style="display: flex; flex-direction: column; gap: 10px; margin-top: 18px;">
+                    <button class="btn btn-hint" id="btn-hint">
+                        💡 Reveal a Hint
+                        <span id="hint-counter" style="opacity:0.6; font-weight:400;"></span>
+                    </button>
+                    <button class="btn btn-abort">Abort Mission</button>
+                </div>
             </div>
-
-            <button class="btn btn-hint" id="btn-hint" onclick="requestHint()">
-                💡 Reveal a Hint
-                <span id="hint-counter" style="opacity:0.6; font-weight:400;"></span>
-            </button>
 
             <div class="attempts-bar">
                 <div>Language: <code id="mission-lang"></code></div>
@@ -641,17 +834,31 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                     Hints Revealed
                 </div>
                 <ul class="hints-list" id="hints-list"></ul>
+                <div style="display: flex; flex-direction: column; gap: 10px; margin-top: 18px;">
+                    <button class="btn btn-hint" id="btn-more-hint">
+                        💡 Reveal Another Hint
+                        <span id="hint-counter-2" style="opacity:0.6; font-weight:400;"></span>
+                    </button>
+                    <button class="btn btn-hint hidden" id="btn-expert-solution" style="background: rgba(139,92,246,0.12); color: #8b5cf6; border-color: rgba(139,92,246,0.2);">
+                        💡 Show Expert Solution
+                    </button>
+                    <button class="btn btn-abort">Abort Mission</button>
+                </div>
             </div>
-
-            <button class="btn btn-hint" id="btn-more-hint" onclick="requestHint()">
-                💡 Reveal Another Hint
-                <span id="hint-counter-2" style="opacity:0.6; font-weight:400;"></span>
-            </button>
 
             <div class="attempts-bar">
                 <div>Language: <code id="hinting-lang"></code></div>
                 <div>Attempts: <span class="attempts-count" id="hinting-attempts">0</span></div>
             </div>
+        </div>
+
+        <!-- ═══ TESTING View ═══ -->
+        <div id="view-testing" class="view-container hidden">
+            <div class="card" style="text-align: center; padding: 40px 20px;">
+                <div class="spinner"></div>
+                <div class="text-question" style="margin-top: 20px; color: #94a3b8;">Evaluating your solution...</div>
+            </div>
+            <button class="btn btn-retry" disabled>↻ Try Again</button>
         </div>
 
         <!-- ═══ PASSED View ═══ -->
@@ -675,15 +882,47 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             <div class="failed-container">
                 <div class="failed-icon">✗</div>
                 <div class="failed-title">Not quite yet</div>
-                <div class="failed-subtitle">
+                <div class="failed-subtitle" id="failed-message">
                     The test didn't pass, but that's okay.<br>
                     Re-read the question, check the hints, and try again.
                 </div>
-                <button class="btn btn-retry" onclick="retry()">↻ Try Again</button>
+                <div style="display: flex; flex-direction: column; gap: 10px; margin-top: 18px; width: 100%;">
+                    <button class="btn btn-retry" id="btn-retry-failed">↻ Try Again</button>
+                    <button class="btn btn-abort">Abort Mission</button>
+                </div>
             </div>
             <div class="attempts-bar">
                 <div>Keep going!</div>
                 <div>Attempts: <span class="attempts-count" id="failed-attempts">0</span></div>
+            </div>
+        </div>
+        
+        <!-- ═══ SOLUTION View ═══ -->
+        <div id="view-solution" class="view-container hidden">
+            <div class="card" style="border-color: rgba(139,92,246,0.15); background: rgba(139,92,246,0.02);">
+                <div class="card-label">
+                    <span class="card-label-dot" style="background: #8b5cf6;"></span>
+                    Expert Solution
+                </div>
+                <div id="solution-spinner" class="spinner" style="margin: 20px auto; display: block; border-top-color: #8b5cf6; border-color: rgba(139,92,246,0.2);"></div>
+                
+                <div id="solution-content" class="hidden">
+                    <pre style="background: #0f172a; padding: 12px; border-radius: 8px; overflow-x: auto; margin: 10px 0;"><code id="solution-code" style="color: #e2e8f0; font-family: monospace; font-size: 0.8rem;"></code></pre>
+                    
+                    <div style="margin-top: 16px;">
+                        <div style="font-size: 0.8rem; font-weight: 600; color: #8b5cf6; margin-bottom: 4px;">Explanation</div>
+                        <p class="text-body" id="solution-explanation"></p>
+                    </div>
+
+                    <div style="margin-top: 16px;">
+                        <div style="font-size: 0.8rem; font-weight: 600; color: #10b981; margin-bottom: 4px;">What you learned</div>
+                        <p class="text-body" id="solution-concept"></p>
+                    </div>
+                </div>
+                
+                <div style="display: flex; flex-direction: column; gap: 10px; margin-top: 18px; width: 100%;">
+                    <button class="btn btn-abort">Close Mission</button>
+                </div>
             </div>
         </div>
     </div>
@@ -696,6 +935,7 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             IDLE:        document.getElementById('view-idle'),
             QUESTIONING: document.getElementById('view-questioning'),
             HINTING:     document.getElementById('view-hinting'),
+            TESTING:     document.getElementById('view-testing'),
             PASSED:      document.getElementById('view-passed'),
             FAILED:      document.getElementById('view-failed'),
         };
@@ -706,6 +946,7 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             IDLE:        'Idle',
             QUESTIONING: 'Socratic Mode Active',
             HINTING:     'Hints Revealed',
+            TESTING:     'Evaluating',
             PASSED:      'Mission Complete',
             FAILED:      'Test Failed',
         };
@@ -722,6 +963,18 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
 
         function renderState(data) {
             const { state, mission, attempts, totalHints, revealedHints } = data;
+            console.log("[UI] Rendering state", state);
+            console.log("[DEBUG] incoming state:", state);
+            console.log("[DEBUG] incoming revealedHints:", revealedHints);
+            console.log("[DEBUG] incoming hints array:", mission ? mission.hints : 'no mission');
+
+            // Update debug panel
+            const debugState = document.getElementById('debug-state');
+            const debugRevealed = document.getElementById('debug-revealed');
+            const debugTotal = document.getElementById('debug-total');
+            if (debugState) debugState.textContent = state;
+            if (debugRevealed) debugRevealed.textContent = revealedHints;
+            if (debugTotal) debugTotal.textContent = totalHints;
 
             showView(state);
 
@@ -759,13 +1012,29 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                 moreBtn.disabled = (revealedHints >= totalHints);
             }
 
+            if (state === 'TESTING') {
+                const el = document.getElementById('testing-attempts');
+                if (el) {
+                    el.textContent = attempts;
+                }
+                // Button is inherently hidden because it's only in the FAILED view,
+                // but this satisfies the logic of disabling retry while testing.
+            }
+
             if (state === 'PASSED') {
                 document.getElementById('passed-attempts').textContent = attempts;
             }
 
             if (state === 'FAILED') {
                 document.getElementById('failed-attempts').textContent = attempts;
+                if (data.customFailedMessage) {
+                    document.getElementById('failed-message').textContent = data.customFailedMessage;
+                } else {
+                    document.getElementById('failed-message').innerHTML = "The test didn't pass, but that's okay.<br>Re-read the question, check the hints, and try again.";
+                }
             }
+
+            console.log('[VERIFY]', document.getElementById('hints-list')?.innerHTML);
         }
 
         function escapeHtml(text) {
@@ -776,6 +1045,8 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
 
         // ── Outbound messages to extension ──
         function requestHint() {
+            console.log("[UI] Hint button clicked");
+            console.log("[UI] Sending REQUEST_HINT");
             vscode.postMessage({ type: 'REQUEST_HINT' });
         }
 
@@ -783,9 +1054,74 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             vscode.postMessage({ type: 'RETRY' });
         }
 
+        function abort() {
+            vscode.postMessage({ type: 'ABORT' });
+        }
+
+        // Register event listeners immediately
+        console.log('[DEBUG] document.readyState:', document.readyState);
+
+        document.addEventListener('click', e => {
+            console.log('[GLOBAL CLICK]', e.target);
+        });
+
+        document.body.addEventListener('click', e => {
+            console.log('[BODY CLICK]', e.target);
+        });
+
+        const btnHint = document.getElementById('btn-hint');
+        console.log('[DEBUG] btnHint found:', !!btnHint);
+        if (btnHint) {
+            const rect = btnHint.getBoundingClientRect();
+            const computedStyle = window.getComputedStyle(btnHint);
+            console.log('[DEBUG] btnHint rect:', rect.width, rect.height, rect.top, rect.left);
+            console.log('[DEBUG] btnHint pointer-events:', computedStyle.pointerEvents);
+            console.log('[DEBUG] btnHint opacity:', computedStyle.opacity);
+            console.log('[DEBUG] btnHint disabled:', btnHint.disabled);
+
+            btnHint.addEventListener('mousedown', () => console.log('[DEBUG] btnHint mousedown'));
+            btnHint.addEventListener('mouseup', () => console.log('[DEBUG] btnHint mouseup'));
+
+            btnHint.addEventListener('click', () => {
+                console.log('[DEBUG] Actual click handler fired for btnHint');
+                requestHint();
+            });
+            console.log('[DEBUG] Listener attached to btn-hint');
+        }
+
+        const btnMoreHint = document.getElementById('btn-more-hint');
+        if (btnMoreHint) {
+            btnMoreHint.addEventListener('click', () => {
+                console.log('[DEBUG] Actual click handler fired for btnMoreHint');
+                requestHint();
+            });
+            console.log('[DEBUG] Listener attached to btn-more-hint');
+        }
+
+        const btnRetryFailed = document.getElementById('btn-retry-failed');
+        if (btnRetryFailed) {
+            btnRetryFailed.addEventListener('click', () => {
+                console.log('[DEBUG] Actual click handler fired for btnRetryFailed');
+                retry();
+            });
+            console.log('[DEBUG] Listener attached to btn-retry-failed');
+        }
+
+        const btnAborts = document.querySelectorAll('.btn-abort');
+        btnAborts.forEach((btn, idx) => {
+            btn.addEventListener('click', () => {
+                console.log('[DEBUG] Actual click handler fired for btnAbort idx=' + idx);
+                abort();
+            });
+            console.log('[DEBUG] Listener attached to btn-abort idx=' + idx);
+        });
+
         // ── Inbound messages from extension ──
         window.addEventListener('message', event => {
             const message = event.data;
+            if (message.type === 'STATE_UPDATE') {
+                console.log("[UI] State received", message.state);
+            }
 
             if (message.type === 'STATE_UPDATE') {
                 renderState(message);

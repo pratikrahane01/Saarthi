@@ -20,6 +20,12 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from dotenv import load_dotenv
+import os
+
+env_path = os.path.join(os.path.dirname(__file__), ".env")
+load_dotenv(env_path)
+print("Groq API Key Loaded:", bool(os.environ.get("GROQ_API_KEY")))
 
 from backend.routers import missions_router
 

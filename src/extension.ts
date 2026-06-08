@@ -1,11 +1,14 @@
 import * as vscode from 'vscode';
 import { activateWatcher } from './watcher';
-import { SocraticDashboardPanel } from './ui/dashboard';
 import { SocraticSidebarProvider } from './ui/sidebar';
 import { Mission } from './missions';
+import { cleanUpAllTests } from './interceptor';
 
-export function activate(context: vscode.ExtensionContext) {
+export async function activate(context: vscode.ExtensionContext) {
     console.log('Zero-Magic Deconstruction Agent is now active.');
+
+    // Phase 9: Clean up any orphaned test files from previous sessions
+    await cleanUpAllTests();
 
     // Phase 1: Activate the error watcher & Quick Fix provider
     activateWatcher(context);
@@ -19,18 +22,22 @@ export function activate(context: vscode.ExtensionContext) {
         )
     );
 
-    // Dashboard command — push mission to BOTH the old panel and the new sidebar
-    let renderDashboardCmd = vscode.commands.registerCommand('zeroMagic.renderSocraticDashboard', (mission: Mission) => {
-        // Show in the legacy floating panel (Teammate 1 Phase 6 work)
-        SocraticDashboardPanel.createOrShow(mission);
-
-        // Also push to the new sidebar (Teammate 4 Phase 5 work)
-        if (SocraticSidebarProvider.instance) {
-            SocraticSidebarProvider.instance.showMission(mission);
+    // Primary UI command — sidebar.ts is the single source of truth for all
+    // mission state (IDLE → QUESTIONING → HINTING → PASSED / FAILED).
+    // The legacy floating dashboard panel has been retired as primary UI.
+    const renderDashboardCmd = vscode.commands.registerCommand(
+        'zeroMagic.renderSocraticDashboard',
+        (mission: Mission) => {
+            if (SocraticSidebarProvider.instance) {
+                SocraticSidebarProvider.instance.showMission(mission);
+            }
         }
-    });
+    );
 
     context.subscriptions.push(renderDashboardCmd);
 }
 
-export function deactivate() {}
+
+export async function deactivate() {
+    await cleanUpAllTests();
+}

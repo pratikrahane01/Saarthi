@@ -207,3 +207,19 @@ class MissionResponse(BaseModel):
             }
         }
     }
+
+
+# ---------------------------------------------------------------------------
+# Expert Solution Models
+# ---------------------------------------------------------------------------
+
+class SolutionRequest(BaseModel):
+    language: str = Field(...)
+    errorCode: str = Field(...)
+    sourceCode: str = Field(...)
+    diagnosticMessage: str = Field(...)
+
+class SolutionResponse(BaseModel):
+    fixedCode: str = Field(...)
+    explanation: str = Field(...)
+    conceptSummary: str = Field(...)

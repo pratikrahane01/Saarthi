@@ -3,3 +3,5 @@ out/
 .vscode-test/
 *.vsix
 __pycache__/
+.env
+.zero_magic/

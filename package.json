@@ -3,6 +3,7 @@
   "displayName": "Zero-Magic Deconstruction Agent",
   "description": "A Socratic deconstruction agent that replaces AI hand-holding with failing tests.",
   "version": "0.0.1",
+  "publisher": "zero-magic-team",
   "engines": {
     "vscode": "^1.80.0"
   },

@@ -28,28 +28,40 @@ export function activateWatcher(context: vscode.ExtensionContext) {
         { providedCodeActionKinds: [vscode.CodeActionKind.QuickFix] }
     );
 
+    let isMissionLoading = false;
+
     // 3. The Command Hook: What happens when the user clicks the Quick Fix
     const commandHandler = vscode.commands.registerCommand(
         'zeroMagic.triggerSocraticHelp', 
         async (event: DiagnosticEvent) => {
-            // Show immediate visual confirmation to the user
-            vscode.window.withProgress({
-                location: vscode.ProgressLocation.Notification,
-                title: "Zero-Magic Engine",
-                cancellable: false
-            }, async (progress) => {
-                progress.report({ message: "Analyzing error context..." });
-                
-                // Invoke your Phase 2 matching module
-                const matchedMission = await matchErrorToMission(event);
-                
-                if (matchedMission) {
-                    progress.report({ message: "Socratic Mission Found! Handing off..." });
-                    await executeMissionHandOff(matchedMission);
-                } else {
-                    vscode.window.showInformationMessage("No guided lesson available for this specific error. Keep debugging!");
-                }
-            });
+            if (isMissionLoading) {
+                console.log('Zero-Magic: Ignored duplicate mission request.');
+                return;
+            }
+
+            isMissionLoading = true;
+            try {
+                // Show immediate visual confirmation to the user
+                await vscode.window.withProgress({
+                    location: vscode.ProgressLocation.Notification,
+                    title: "Zero-Magic Engine",
+                    cancellable: false
+                }, async (progress) => {
+                    progress.report({ message: "Analyzing error context..." });
+                    
+                    // Invoke your Phase 2 matching module
+                    const matchedMission = await matchErrorToMission(event);
+                    
+                    if (matchedMission) {
+                        progress.report({ message: "Socratic Mission Found! Handing off..." });
+                        await executeMissionHandOff(matchedMission);
+                    } else {
+                        vscode.window.showInformationMessage("No guided lesson available for this specific error. Keep debugging!");
+                    }
+                });
+            } finally {
+                isMissionLoading = false;
+            }
         }
     );
 
