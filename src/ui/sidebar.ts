@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { Mission, fetchExpertSolution, SolutionRequest } from '../missions';
 import * as interceptor from '../interceptor';
+import * as path from 'path';
 
 /**
  * The six possible UI states for the Socratic Dashboard.
@@ -28,6 +29,14 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
         conceptSummary: string;
     };
 
+    // Game state variables matching user specifications
+    private _currentPage: number = 1;
+    private _hearts: number = 3;
+    private _hintsUsed: number = 0;
+    private _startTime: number = 0;
+    private _socraticChallengeUri?: vscode.Uri;
+    private _hasFailedSubmit: boolean = false;
+
     constructor(private readonly _extensionUri: vscode.Uri) {
         SocraticSidebarProvider.instance = this;
     }
@@ -47,10 +56,10 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             localResourceRoots: [this._extensionUri]
         };
 
-        // Set the initial HTML
+        // Set the HTML
         webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
 
-        // Send initial IDLE state
+        // Send initial state
         this._postState();
 
         // Listen for messages FROM the webview
@@ -69,8 +78,15 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
     public showMission(mission: Mission) {
         this._currentMission = mission;
         this._currentState = 'QUESTIONING';
+        this._currentPage = 1;
+        this._hearts = 3;
+        this._hintsUsed = 0;
+        this._startTime = Date.now();
+        this._socraticChallengeUri = undefined;
+        this._hasFailedSubmit = false;
         this._attempts = 0;
         this._revealedHints = 0;
+        this._expertSolution = undefined;
         this._postState();
 
         // Make sure the sidebar is visible
@@ -99,6 +115,12 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
      */
     public reset() {
         this._currentState = 'IDLE';
+        this._currentPage = 1;
+        this._hearts = 3;
+        this._hintsUsed = 0;
+        this._startTime = 0;
+        this._socraticChallengeUri = undefined;
+        this._hasFailedSubmit = false;
         this._currentMission = undefined;
         this._attempts = 0;
         this._revealedHints = 0;
@@ -108,7 +130,7 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
     }
 
     /**
-     * Post an arbitrary message to the webview (used by Phase 6 UNLOCK flow).
+     * Post an arbitrary message to the webview.
      */
     public postMessage(message: any) {
         this._view?.webview.postMessage(message);
@@ -121,25 +143,18 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
     private _handleWebviewMessage(message: any) {
         switch (message.type) {
             case 'REQUEST_HINT':
-                console.log("[EXTENSION] REQUEST_HINT received");
-                console.log("[DEBUG] currentState:", this._currentState);
-                console.log("[DEBUG] revealedHints:", this._revealedHints);
-                console.log("[DEBUG] mission.hints.length:", this._currentMission?.hints?.length);
                 this._onRequestHint();
                 break;
 
-            case 'RETRY':
-                // User clicked "Try Again" from the FAILED screen.
-                // Ignore duplicate clicks if a test is already actively running.
+            case 'SUBMIT_ANSWER':
                 if (this._isTesting) {
-                    console.log('Zero-Magic Sidebar: Ignoring RETRY, test already running.');
+                    console.log('Zero-Magic Sidebar: Ignoring SUBMIT_ANSWER, test already running.');
                     break;
                 }
                 this._retrigger();
                 break;
 
             case 'REQUEST_STATE':
-                // Webview is asking for the current state (e.g. on first load)
                 this._postState();
                 break;
 
@@ -151,6 +166,18 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                 this._onRequestSolution();
                 break;
 
+            case 'MORE_EXPLANATION':
+                this._onMoreExplanation();
+                break;
+
+            case 'NAVIGATE_ERROR':
+                this._cycleErrors(message.direction);
+                break;
+
+            case 'RESET':
+                this.reset();
+                break;
+
             default:
                 console.log('Zero-Magic Sidebar: Unknown message type', message.type);
         }
@@ -160,11 +187,11 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
      * Reveal the next hint in the Socratic sequence.
      */
     private _onRequestHint() {
-        console.log("[EXTENSION] _onRequestHint executed");
         if (!this._currentMission) { return; }
 
         if (this._revealedHints < this._currentMission.hints.length) {
             this._revealedHints++;
+            this._hintsUsed++;
         }
 
         this._currentState = 'HINTING';
@@ -174,10 +201,6 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
     private async _onRequestSolution() {
         if (!this._currentMission) return;
         
-        // Show loading state by transitioning to SOLUTION temporarily or keeping TESTING spinner logic
-        this._currentState = 'SOLUTION'; 
-        
-        // Find the text document
         let sourceCode = '';
         if (this._currentMission.targetUri) {
             try {
@@ -206,18 +229,192 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             };
         }
         
+        // Generate challenge file
+        try {
+            const targetPath = vscode.Uri.parse(this._currentMission.targetUri).fsPath;
+            const dir = path.dirname(targetPath);
+            const ext = path.extname(targetPath);
+            const challengePath = path.join(dir, `socratic_challenge${ext}`);
+            this._socraticChallengeUri = vscode.Uri.file(challengePath);
+
+            const commentPrefix = this._currentMission.language === 'python' ? '# ' : '// ';
+            const explanationLines = this._expertSolution.explanation.split('\n').map(line => `${commentPrefix}${line}`);
+            
+            const fileContent = [
+                `${commentPrefix}=====================================================================`,
+                `${commentPrefix}ZERO-MAGIC SOCRATIC CHALLENGE`,
+                `${commentPrefix}=====================================================================`,
+                `${commentPrefix}Socratic Question:`,
+                `${commentPrefix}${this._currentMission.socraticQuestion}`,
+                `${commentPrefix}`,
+                `${commentPrefix}Detailed Explanation of the Error:`,
+                ...explanationLines,
+                `${commentPrefix}`,
+                `${commentPrefix}INSTRUCTIONS:`,
+                `${commentPrefix}Fix the code below so it passes the hidden tests.`,
+                `${commentPrefix}Click "Submit Answer" in the sidebar when you're ready!`,
+                `${commentPrefix}=====================================================================`,
+                ``,
+                sourceCode
+            ].join('\n');
+
+            await vscode.workspace.fs.writeFile(this._socraticChallengeUri, Buffer.from(fileContent, 'utf8'));
+
+            const doc = await vscode.workspace.openTextDocument(this._socraticChallengeUri);
+            await vscode.window.showTextDocument(doc, vscode.ViewColumn.Two);
+        } catch (err) {
+            console.error("Failed to generate challenge file:", err);
+        }
+
+        this._currentPage = 2;
+        this._hearts = 3;
+        this._hasFailedSubmit = false;
+        this._currentState = 'SOLUTION'; 
         this._postState();
     }
 
-    /**
-     * Re-run the hidden test for the current mission after a RETRY.
-     *
-     * Reuses interceptor.trigger() (Phase 3) and reportTestResult() (Phase 6)
-     * so there is zero duplication of test-execution or unlock logic.
-     * If the pass condition is now met, unlockMission() is called automatically
-     * from missions.ts#executeMissionHandOff — but since we are already past
-     * the hand-off here, we handle unlock directly to avoid a double render.
-     */
+    private async _onMoreExplanation() {
+        if (!this._currentMission || this._hearts <= 0) return;
+
+        this._hearts--;
+        this._hintsUsed++;
+        if (this._revealedHints < this._currentMission.hints.length) {
+            this._revealedHints++;
+        }
+
+        if (this._hearts <= 0) {
+            this._currentPage = 3;
+            this._currentState = 'FAILED';
+            await this._saveStepHistory(false);
+        } else if (this._socraticChallengeUri) {
+            try {
+                const doc = await vscode.workspace.openTextDocument(this._socraticChallengeUri);
+                const text = doc.getText();
+                const commentPrefix = this._currentMission.language === 'python' ? '# ' : '// ';
+                const nextHintText = this._currentMission.hints[this._revealedHints - 1] || "Check the syntax and logic carefully.";
+                const extraComment = `\n${commentPrefix}---------------------------------------------------------------------\n${commentPrefix}EXTRA HINT (Heart Consumed):\n${commentPrefix}${nextHintText}\n${commentPrefix}---------------------------------------------------------------------\n`;
+                
+                // Insert it after the instructions banner separator
+                const separator = `=====================================================================`;
+                const parts = text.split(separator);
+                let newText = text;
+                if (parts.length >= 3) {
+                    newText = parts[0] + separator + parts[1] + extraComment + separator + parts[2];
+                } else {
+                    newText = extraComment + text;
+                }
+                
+                await vscode.workspace.fs.writeFile(this._socraticChallengeUri, Buffer.from(newText, 'utf8'));
+            } catch (e) {
+                console.error("Could not append extra hint to challenge file", e);
+            }
+        }
+
+        this._postState();
+    }
+
+    private async _cycleErrors(direction: 'next' | 'prev') {
+        const diagnostics = vscode.languages.getDiagnostics();
+        const errorEvents: any[] = [];
+        
+        for (const [uri, diags] of diagnostics) {
+            const errors = diags.filter(d => d.severity === vscode.DiagnosticSeverity.Error);
+            for (const err of errors) {
+                // Skip the socratic challenge file itself when navigating to avoid loops
+                if (uri.fsPath.includes('socratic_challenge')) continue;
+                
+                errorEvents.push({
+                    uri,
+                    filePath: uri.fsPath,
+                    languageId: uri.fsPath.endsWith('.py') ? 'python' : 'javascript',
+                    errorMessage: err.message,
+                    lineText: '',
+                    lineNumber: err.range.start.line
+                });
+            }
+        }
+        
+        if (errorEvents.length === 0) {
+            vscode.window.showInformationMessage("No active compiler errors found in the workspace!");
+            return;
+        }
+        
+        let currentIndex = -1;
+        if (this._currentMission) {
+            currentIndex = errorEvents.findIndex(e => e.errorMessage === this._currentMission?.originalMessage);
+        }
+        
+        let newIndex = 0;
+        if (currentIndex !== -1) {
+            if (direction === 'next') {
+                newIndex = (currentIndex + 1) % errorEvents.length;
+            } else {
+                newIndex = (currentIndex - 1 + errorEvents.length) % errorEvents.length;
+            }
+        } else {
+            newIndex = 0;
+        }
+        
+        const nextError = errorEvents[newIndex];
+        
+        try {
+            const doc = await vscode.workspace.openTextDocument(nextError.uri);
+            nextError.languageId = doc.languageId;
+            nextError.lineText = doc.lineAt(nextError.lineNumber).text;
+            
+            await vscode.commands.executeCommand('zeroMagic.triggerSocraticHelp', nextError);
+        } catch (e) {
+            console.error("Failed to cycle errors:", e);
+        }
+    }
+
+    private async _saveStepHistory(passed: boolean) {
+        if (!this._currentMission) return;
+        
+        try {
+            const workspaceFolders = vscode.workspace.workspaceFolders;
+            if (!workspaceFolders || workspaceFolders.length === 0) return;
+            
+            const rootUri = workspaceFolders[0].uri;
+            const historyDir = vscode.Uri.joinPath(rootUri, '.zero_magic');
+            const historyUri = vscode.Uri.joinPath(historyDir, 'history.txt');
+            
+            await vscode.workspace.fs.createDirectory(historyDir);
+            
+            const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
+            const timeTaken = this._startTime ? Math.round((Date.now() - this._startTime) / 1000) : 0;
+            
+            const entry = [
+                `==================================================`,
+                `ZERO-MAGIC SESSION SUMMARY - ${timestamp}`,
+                `==================================================`,
+                `Mission ID      : ${this._currentMission.id}`,
+                `Mission Title   : ${this._currentMission.title}`,
+                `Language        : ${this._currentMission.language}`,
+                `Error Code      : ${this._currentMission.originalErrorCode}`,
+                `Socratic Q      : ${this._currentMission.socraticQuestion}`,
+                `Attempts        : ${this._attempts}`,
+                `Hearts Left     : ${this._hearts}`,
+                `Hints Used      : ${this._hintsUsed}`,
+                `Time Taken      : ${timeTaken} seconds`,
+                `Result          : ${passed ? 'PASSED (Success)' : 'FAILED (Run out of hearts)'}`,
+                `==================================================\n\n`
+            ].join('\n');
+            
+            let existingContent = '';
+            try {
+                const data = await vscode.workspace.fs.readFile(historyUri);
+                existingContent = Buffer.from(data).toString('utf8');
+            } catch (e) {
+                // File does not exist yet
+            }
+            
+            await vscode.workspace.fs.writeFile(historyUri, Buffer.from(entry + existingContent, 'utf8'));
+        } catch (err) {
+            console.error("Failed to save step history:", err);
+        }
+    }
+
     private async _retrigger() {
         if (!this._currentMission || this._isTesting) {
             console.warn('Zero-Magic Sidebar: Cannot retrigger. No mission or test already running.');
@@ -246,13 +443,13 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             let finalPassed = result.passed;
             let twoFactorFailedMessage: string | undefined;
 
-            if (result.passed && mission.targetUri) {
-                const targetUri = vscode.Uri.parse(mission.targetUri);
-                const diagnostics = vscode.languages.getDiagnostics(targetUri);
+            const checkUri = this._socraticChallengeUri || (mission.targetUri ? vscode.Uri.parse(mission.targetUri) : undefined);
+            if (result.passed && checkUri) {
+                const diagnostics = vscode.languages.getDiagnostics(checkUri);
                 
                 const hasOriginalError = diagnostics.some(d => 
                     d.severity === vscode.DiagnosticSeverity.Error && 
-                    d.message === mission.originalMessage
+                    (d.message === mission.originalMessage || d.message.includes(mission.originalErrorCode))
                 );
 
                 if (hasOriginalError) {
@@ -262,18 +459,40 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                 }
             }
 
-            // reportTestResult increments _attempts and drives PASSED / FAILED state.
-            this.reportTestResult(finalPassed, twoFactorFailedMessage);
-
-            // If the student finally passed, run the full unlock + cleanup flow.
             if (finalPassed) {
+                this._currentPage = 3;
+                this._currentState = 'PASSED';
+                this._customFailedMessage = undefined;
+                await this._saveStepHistory(true);
                 await interceptor.unlockMission(mission.id, mission.language);
+                this._postState();
+            } else {
+                this._hearts--;
+                this._hasFailedSubmit = true;
+                this._customFailedMessage = twoFactorFailedMessage || "The concept check test failed.";
+                
+                if (this._hearts <= 0) {
+                    this._currentPage = 3;
+                    this._currentState = 'FAILED';
+                    await this._saveStepHistory(false);
+                } else {
+                    this._currentState = 'FAILED';
+                }
+                this._postState();
             }
         } catch (err) {
             console.error('Zero-Magic Sidebar: Retrigger failed:', err);
             vscode.window.setStatusBarMessage('⚠️ Zero-Magic: Test re-run failed.', 5000);
-            // Fall back to FAILED state so the student still sees something.
-            this._currentState = 'FAILED';
+            
+            this._hearts--;
+            this._hasFailedSubmit = true;
+            if (this._hearts <= 0) {
+                this._currentPage = 3;
+                this._currentState = 'FAILED';
+                await this._saveStepHistory(false);
+            } else {
+                this._currentState = 'FAILED';
+            }
             this._postState();
         } finally {
             if (executionId === undefined || interceptor.isLatestExecution(executionId)) {
@@ -282,25 +501,23 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
         }
     }
 
-    /**
-     * Safely aborts the active mission, cancels any background test processing,
-     * deletes hidden files, and restores the UI to IDLE.
-     */
     private async _abortMission() {
         console.log('Zero-Magic Sidebar: Aborting mission.');
-        // 1. Cancel pending execution results (prevents UI lockups from stale background tests)
         interceptor.invalidateAllExecutions();
-        // 2. Clear any active testing lock
         this._isTesting = false;
-        // 3. Delete hidden test files
         await interceptor.cleanUpAllTests();
-        // 4. Clear mission memory and return to IDLE
+        
+        // Clean up socratic challenge file if it exists
+        if (this._socraticChallengeUri) {
+            try {
+                await vscode.workspace.fs.delete(this._socraticChallengeUri, { useTrash: false });
+            } catch (e) {
+                // Ignore if already deleted
+            }
+        }
+        
         this.reset();
     }
-
-    // ──────────────────────────────────────────────
-    //  OUTBOUND — push state to the webview
-    // ──────────────────────────────────────────────
 
     private _postState() {
         if (!this._view) return;
@@ -309,6 +526,11 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
         this._view.webview.postMessage({
             type: 'STATE_UPDATE',
             state: this._currentState,
+            page: this._currentPage,
+            hearts: this._hearts,
+            hintsUsed: this._hintsUsed,
+            hasFailedSubmit: this._hasFailedSubmit,
+            timeElapsed: this._startTime ? Math.round((Date.now() - this._startTime) / 1000) : 0,
             mission: this._currentMission ? {
                 id: this._currentMission.id,
                 title: this._currentMission.title,
@@ -325,12 +547,7 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
         });
     }
 
-    // ──────────────────────────────────────────────
-    //  HTML — the full webview page
-    // ──────────────────────────────────────────────
-
     private _getHtmlForWebview(webview: vscode.Webview): string {
-        // We inline the HTML directly since VS Code webviews need special CSP handling
         const nonce = getNonce();
 
         return /*html*/`<!DOCTYPE html>
@@ -343,586 +560,478 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                    style-src ${webview.cspSource} 'unsafe-inline';
                    script-src 'nonce-${nonce}';
                    font-src https://fonts.gstatic.com;">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
     <title>Zero-Magic Dashboard</title>
     <style>
-        /* ── Reset & Base ── */
-        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-        body {
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-            background: #0b0f1a;
-            color: #e2e8f0;
-            padding: 0;
+        *, *::before, *::after {
+            box-sizing: border-box;
             margin: 0;
-            overflow-x: hidden;
-            min-height: 100vh;
+            padding: 0;
         }
 
-        /* ── Ambient glow background ── */
-        body::before {
-            content: '';
+        body {
+            font-family: 'DM Mono', 'Courier New', monospace;
+            background-color: #13141c;
+            color: #a6accd;
+            padding: 12px;
+            overflow-x: hidden;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* Terminal Window Container */
+        .terminal-window {
+            display: flex;
+            flex-direction: column;
+            flex-grow: 1;
+            background-color: #1c1e26;
+            border: 1px solid rgba(166, 172, 205, 0.15);
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
+            position: relative;
+        }
+
+        /* Loading Overlay matching vladburca theme */
+        .loading-overlay {
             position: fixed;
-            top: -50%;
-            left: -50%;
-            width: 200%;
-            height: 200%;
-            background: radial-gradient(circle at 30% 20%, rgba(56, 189, 248, 0.04) 0%, transparent 50%),
-                        radial-gradient(circle at 70% 80%, rgba(139, 92, 246, 0.04) 0%, transparent 50%);
-            z-index: -1;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            background-color: rgba(19, 20, 28, 0.85);
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+            z-index: 9999;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            gap: 32px;
+            transition: opacity 0.65s ease, visibility 0.65s ease;
+            opacity: 1;
+            visibility: visible;
+        }
+
+        .loading-overlay.hidden {
+            opacity: 0;
+            visibility: hidden;
             pointer-events: none;
         }
 
-        .app { position: relative; z-index: 1; padding: 20px 16px; }
-
-        /* ── Header ── */
-        .header {
-            text-align: center;
-            padding-bottom: 20px;
-            border-bottom: 1px solid rgba(255,255,255,0.06);
-            margin-bottom: 20px;
-        }
-
-        .logo {
-            font-size: 1.35rem;
-            font-weight: 800;
-            letter-spacing: -0.02em;
-            background: linear-gradient(135deg, #38bdf8 0%, #818cf8 50%, #c084fc 100%);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
-        }
-
-        .badge {
-            display: inline-flex;
+        /* Pacman Eating Dots Animation */
+        .pacman-container {
+            position: relative;
+            width: 200px;
+            height: 50px;
+            display: flex;
             align-items: center;
-            gap: 6px;
-            margin-top: 8px;
-            padding: 4px 12px;
-            border-radius: 9999px;
-            font-size: 0.65rem;
-            font-weight: 600;
+            justify-content: center;
+        }
+
+        .pacman {
+            position: relative;
+            width: 44px;
+            height: 44px;
+            z-index: 2;
+        }
+
+        .pacman-top, .pacman-bottom {
+            position: absolute;
+            width: 44px;
+            height: 22px;
+            background-color: #f29879;
+        }
+
+        .pacman-top {
+            top: 0;
+            border-radius: 22px 22px 0 0;
+            transform-origin: bottom center;
+            animation: spin-up 0.55s infinite ease-in-out alternate;
+        }
+
+        .pacman-bottom {
+            bottom: 0;
+            border-radius: 0 0 22px 22px;
+            transform-origin: top center;
+            animation: spin-down 0.55s infinite ease-in-out alternate;
+        }
+
+        @keyframes spin-up {
+            0% { transform: rotate(-35deg); }
+            100% { transform: rotate(0deg); }
+        }
+
+        @keyframes spin-down {
+            0% { transform: rotate(35deg); }
+            100% { transform: rotate(0deg); }
+        }
+
+        .dots-container {
+            position: absolute;
+            left: 100px; /* Center point aligned with Pacman mouth */
+            top: 21px;
+            width: 100px;
+            height: 7px;
+            z-index: 1;
+        }
+
+        .dot {
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 7px;
+            height: 7px;
+            background-color: #f29879;
+            border-radius: 50%;
+            animation: dot-slide 1.2s infinite linear;
+        }
+
+        .dot:nth-child(1) { animation-delay: 0s; }
+        .dot:nth-child(2) { animation-delay: 0.3s; }
+        .dot:nth-child(3) { animation-delay: 0.6s; }
+        .dot:nth-child(4) { animation-delay: 0.9s; }
+
+        @keyframes dot-slide {
+            0% {
+                transform: translateX(100px);
+                opacity: 0;
+            }
+            15% {
+                opacity: 1;
+            }
+            85% {
+                opacity: 1;
+            }
+            100% {
+                transform: translateX(0px);
+                opacity: 0;
+            }
+        }
+
+        .loading-text {
+            color: #f29879;
+            font-family: 'DM Mono', monospace;
+            font-size: 0.8rem;
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+            text-align: center;
+        }
+
+        /* Title Bar with traffic lights */
+        .title-bar {
+            display: flex;
+            align-items: center;
+            justify-content: flex-start;
+            gap: 12px;
+            height: 38px;
+            background-color: rgba(0, 0, 0, 0.15);
+            border-bottom: 1px solid rgba(166, 172, 205, 0.1);
+            padding: 0 16px;
+        }
+
+        .window-controls {
+            display: flex;
+            gap: 8px;
+            flex-shrink: 0;
+        }
+
+        .control-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+        }
+        .dot-red { background-color: #ff5f56; }
+        .dot-yellow { background-color: #ffbd2e; }
+        .dot-green { background-color: #27c93f; }
+
+        .window-title {
+            font-size: 0.8rem;
+            color: rgba(166, 172, 205, 0.6);
+            letter-spacing: 0.05em;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            flex-grow: 1;
+        }
+
+
+        /* Content Wrapper */
+        .content {
+            display: flex;
+            flex-direction: column;
+            padding: 20px;
+            gap: 20px;
+            flex-grow: 1;
+        }
+
+        /* Main Panel - Dashed outline block */
+        .main-panel {
+            background-color: rgba(0, 0, 0, 0.1);
+            border: 1px dashed rgba(166, 172, 205, 0.25);
+            border-radius: 8px;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            min-height: 160px;
+            transition: all 0.2s ease;
+        }
+
+        .section-header {
+            color: #f29879;
+            font-size: 0.9rem;
+            font-weight: 500;
             text-transform: uppercase;
             letter-spacing: 0.08em;
-            transition: all 0.4s ease;
+            margin-bottom: 4px;
         }
 
-        .badge-dot {
-            width: 6px;
-            height: 6px;
-            border-radius: 50%;
-            display: inline-block;
+        .question-text {
+            font-size: 0.9rem;
+            line-height: 1.6;
+            color: #c5cdd8;
+            white-space: pre-wrap;
+            word-wrap: break-word;
         }
 
-        /* Badge states */
-        .badge-idle        { background: rgba(100,116,139,0.15); color: #94a3b8; border: 1px solid rgba(100,116,139,0.2); }
-        .badge-idle .badge-dot        { background: #64748b; }
-        .badge-questioning { background: rgba(56,189,248,0.1); color: #38bdf8; border: 1px solid rgba(56,189,248,0.2); }
-        .badge-questioning .badge-dot { background: #38bdf8; box-shadow: 0 0 8px rgba(56,189,248,0.5); animation: glow-pulse 2s infinite; }
-        .badge-hinting     { background: rgba(251,191,36,0.1); color: #fbbf24; border: 1px solid rgba(251,191,36,0.2); }
-        .badge-hinting .badge-dot     { background: #fbbf24; box-shadow: 0 0 8px rgba(251,191,36,0.5); }
-        .badge-passed      { background: rgba(16,185,129,0.1); color: #10b981; border: 1px solid rgba(16,185,129,0.2); }
-        .badge-passed .badge-dot      { background: #10b981; box-shadow: 0 0 8px rgba(16,185,129,0.5); }
-        .badge-failed      { background: rgba(244,63,94,0.1); color: #f43f5e; border: 1px solid rgba(244,63,94,0.2); }
-        .badge-failed .badge-dot      { background: #f43f5e; box-shadow: 0 0 8px rgba(244,63,94,0.5); }
-
-        /* ── Cards ── */
-        .card {
-            background: rgba(255,255,255,0.02);
-            border: 1px solid rgba(255,255,255,0.06);
-            border-radius: 14px;
-            padding: 20px;
-            margin-bottom: 16px;
-            backdrop-filter: blur(16px);
-            -webkit-backdrop-filter: blur(16px);
-            transition: all 0.35s ease;
-        }
-
-        .card:hover {
-            border-color: rgba(255,255,255,0.1);
-            box-shadow: 0 8px 32px rgba(0,0,0,0.15);
-        }
-
-        .card-label {
-            font-size: 0.65rem;
-            font-weight: 700;
-            text-transform: uppercase;
-            letter-spacing: 0.1em;
-            color: #64748b;
-            margin-bottom: 10px;
+        /* Capabilities equivalent - Key/Value Table */
+        .stats-panel {
+            border-top: 1px dashed rgba(166, 172, 205, 0.15);
+            padding-top: 16px;
             display: flex;
-            align-items: center;
-            gap: 6px;
-        }
-
-        .card-label-dot {
-            width: 6px;
-            height: 6px;
-            border-radius: 50%;
-            display: inline-block;
-        }
-
-        .card-label-dot.blue   { background: #38bdf8; box-shadow: 0 0 6px #38bdf8; }
-        .card-label-dot.green  { background: #10b981; box-shadow: 0 0 6px #10b981; }
-        .card-label-dot.amber  { background: #fbbf24; box-shadow: 0 0 6px #fbbf24; }
-        .card-label-dot.red    { background: #f43f5e; box-shadow: 0 0 6px #f43f5e; }
-
-        /* ── Typography ── */
-        .text-body {
-            font-size: 0.875rem;
-            line-height: 1.65;
-            color: #cbd5e1;
-        }
-
-        .text-question {
-            font-size: 1rem;
-            font-weight: 600;
-            line-height: 1.55;
-            color: #f1f5f9;
-        }
-
-        code {
-            font-family: 'Fira Code', monospace;
-            font-size: 0.8rem;
-            background: rgba(0,0,0,0.35);
-            padding: 2px 7px;
-            border-radius: 5px;
-            color: #38bdf8;
-        }
-
-        /* ── Hints List ── */
-        .hints-list { list-style: none; padding: 0; }
-
-        .hint-item {
-            display: flex;
+            flex-direction: column;
             gap: 10px;
-            padding: 12px 14px;
-            margin-bottom: 8px;
-            background: rgba(251,191,36,0.04);
-            border: 1px solid rgba(251,191,36,0.1);
-            border-radius: 10px;
-            font-size: 0.85rem;
-            color: #e2e8f0;
-            line-height: 1.5;
-            animation: hint-slide-in 0.4s ease-out;
         }
 
-        .hint-number {
-            flex-shrink: 0;
-            width: 22px;
-            height: 22px;
-            border-radius: 50%;
-            background: rgba(251,191,36,0.15);
-            color: #fbbf24;
-            font-size: 0.7rem;
-            font-weight: 700;
+        .stats-row {
+            display: flex;
+            font-size: 0.85rem;
+            line-height: 1.5;
+        }
+
+        .stats-key {
+            width: 110px;
+            color: rgba(166, 172, 205, 0.5);
+        }
+
+        .stats-val {
+            color: #c5cdd8;
+            font-weight: 500;
+        }
+
+        .heart-icon {
+            font-size: 1.1rem;
+            margin-right: 4px;
+            transition: transform 0.2s ease;
+        }
+
+        /* Navigation equivalent - Actions list */
+        .actions-panel {
+            border-top: 1px dashed rgba(166, 172, 205, 0.15);
+            padding-top: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            margin-top: auto;
+        }
+
+        /* Terminal Menu Style Buttons */
+        .btn {
+            font-family: inherit;
+            font-size: 0.82rem;
+            font-weight: 500;
+            height: 38px;
+            cursor: pointer;
             display: flex;
             align-items: center;
-            justify-content: center;
-        }
-
-        @keyframes hint-slide-in {
-            from { opacity: 0; transform: translateX(-12px); }
-            to   { opacity: 1; transform: translateX(0); }
-        }
-
-        /* ── Spinner ── */
-        .spinner {
-            display: inline-block;
-            width: 24px;
-            height: 24px;
-            border: 3px solid rgba(56,189,248,0.2);
-            border-top-color: #38bdf8;
-            border-radius: 50%;
-            animation: spin 1s linear infinite;
-        }
-
-        @keyframes spin {
-            to { transform: rotate(360deg); }
-        }
-
-        /* ── Buttons ── */
-        .btn {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            gap: 6px;
-            padding: 10px 20px;
-            border-radius: 10px;
-            font-family: 'Inter', sans-serif;
-            font-size: 0.8rem;
-            font-weight: 600;
-            border: none;
-            cursor: pointer;
-            transition: all 0.25s ease;
+            justify-content: flex-start;
+            padding: 0 16px;
+            border-radius: 6px;
+            transition: all 0.2s ease;
             width: 100%;
         }
 
-        .btn:active { transform: scale(0.97); }
-
-        .btn-hint {
-            background: rgba(251,191,36,0.12);
-            color: #fbbf24;
-            border: 1px solid rgba(251,191,36,0.2);
+        /* Outline retro buttons */
+        .btn-outline {
+            background-color: transparent;
+            color: #a6accd;
+            border: 1px solid rgba(166, 172, 205, 0.25);
         }
-        .btn-hint:hover { background: rgba(251,191,36,0.2); box-shadow: 0 0 20px rgba(251,191,36,0.1); }
-        .btn-hint:disabled { opacity: 0.35; cursor: not-allowed; }
-
-        .btn-retry {
-            background: rgba(56,189,248,0.12);
-            color: #38bdf8;
-            border: 1px solid rgba(56,189,248,0.2);
-        }
-        .btn-retry:hover { background: rgba(56,189,248,0.2); box-shadow: 0 0 20px rgba(56,189,248,0.1); }
-        .btn-retry:disabled { opacity: 0.35; cursor: not-allowed; }
-
-        .btn-abort {
-            background: rgba(244,63,94,0.08);
-            color: #f43f5e;
-            border: 1px solid rgba(244,63,94,0.15);
-            margin-top: 12px;
-        }
-        .btn-abort:hover { background: rgba(244,63,94,0.15); box-shadow: 0 0 20px rgba(244,63,94,0.1); }
-
-        /* ── Attempts Counter ── */
-        .attempts-bar {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 12px 0;
-            border-top: 1px solid rgba(255,255,255,0.06);
-            margin-top: 8px;
-            font-size: 0.75rem;
-            color: #64748b;
+        .btn-outline:hover {
+            color: #f29879;
+            border-color: #f29879;
+            background-color: rgba(242, 152, 121, 0.03);
         }
 
-        .attempts-count {
-            font-weight: 700;
-            font-variant-numeric: tabular-nums;
-            color: #94a3b8;
+        /* Solid terminal action button */
+        .btn-solid {
+            background-color: #f29879;
+            color: #13141c;
+            border: 1px solid #f29879;
+        }
+        .btn-solid:hover {
+            background-color: #efa88d;
+            border-color: #efa88d;
         }
 
-        /* ── IDLE state ── */
-        .idle-container {
+        .btn-green {
+            width: 100%;
+        }
+
+        .btn-blue {
+            width: 100%;
+        }
+
+        /* Row of action buttons */
+        .action-row {
             display: flex;
             flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            text-align: center;
-            padding: 48px 16px;
+            gap: 8px;
+            width: 100%;
         }
 
-        .idle-icon {
-            width: 64px;
-            height: 64px;
-            border-radius: 50%;
-            background: linear-gradient(135deg, rgba(56,189,248,0.1), rgba(139,92,246,0.1));
-            border: 1px solid rgba(255,255,255,0.06);
+        .extra-actions {
             display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 1.75rem;
-            margin-bottom: 20px;
-            animation: idle-float 3s ease-in-out infinite;
+            flex-direction: column;
+            gap: 8px;
+            width: 100%;
         }
 
-        @keyframes idle-float {
-            0%, 100% { transform: translateY(0); }
-            50%      { transform: translateY(-8px); }
+        /* Terminal System Footer */
+        .system-footer {
+            font-size: 0.72rem;
+            color: rgba(166, 172, 205, 0.45);
+            margin-top: auto;
+            border-top: 1px dashed rgba(166, 172, 205, 0.15);
+            padding-top: 12px;
+            line-height: 1.4;
         }
 
-        .idle-title {
-            font-size: 1rem;
-            font-weight: 700;
-            color: #e2e8f0;
-            margin-bottom: 8px;
+        /* Success & Failure Glass Banners */
+        .result-box {
+            border-radius: 8px;
+            padding: 12px;
+            border: 1px dashed rgba(166, 172, 205, 0.25);
+            background-color: rgba(0, 0, 0, 0.1);
         }
 
-        .idle-subtitle {
-            font-size: 0.8rem;
-            color: #64748b;
-            line-height: 1.6;
+        .success-banner {
+            color: #27c93f;
+            line-height: 1.5;
         }
 
-        /* ── PASSED state ── */
-        .passed-container {
-            text-align: center;
-            padding: 32px 16px;
+        .fail-banner {
+            color: #ff5f56;
+            line-height: 1.5;
         }
 
-        .passed-icon {
-            width: 72px;
-            height: 72px;
-            border-radius: 50%;
-            background: linear-gradient(135deg, rgba(16,185,129,0.15), rgba(52,211,153,0.1));
-            border: 2px solid rgba(16,185,129,0.3);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 2rem;
-            margin: 0 auto 20px;
-            animation: success-pop 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+        /* Scrollbar */
+        ::-webkit-scrollbar {
+            width: 4px;
         }
-
-        @keyframes success-pop {
-            0%   { transform: scale(0); opacity: 0; }
-            100% { transform: scale(1); opacity: 1; }
+        ::-webkit-scrollbar-track {
+            background: transparent;
         }
-
-        .passed-title {
-            font-size: 1.15rem;
-            font-weight: 800;
-            background: linear-gradient(135deg, #10b981, #34d399);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            margin-bottom: 8px;
+        ::-webkit-scrollbar-thumb {
+            background: rgba(166, 172, 205, 0.15);
+            border-radius: 2px;
         }
-
-        .passed-subtitle {
-            font-size: 0.85rem;
-            color: #94a3b8;
-            line-height: 1.6;
+        ::-webkit-scrollbar-thumb:hover {
+            background: rgba(166, 172, 205, 0.3);
         }
-
-        /* ── FAILED state ── */
-        .failed-container { text-align: center; padding: 24px 0; }
-
-        .failed-icon {
-            width: 56px;
-            height: 56px;
-            border-radius: 50%;
-            background: rgba(244,63,94,0.08);
-            border: 1px solid rgba(244,63,94,0.2);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 1.5rem;
-            margin: 0 auto 16px;
-            animation: shake 0.5s ease-in-out;
-        }
-
-        @keyframes shake {
-            0%, 100% { transform: translateX(0); }
-            20%      { transform: translateX(-6px); }
-            40%      { transform: translateX(6px); }
-            60%      { transform: translateX(-4px); }
-            80%      { transform: translateX(4px); }
-        }
-
-        .failed-title {
-            font-size: 1rem;
-            font-weight: 700;
-            color: #f43f5e;
-            margin-bottom: 6px;
-        }
-
-        .failed-subtitle {
-            font-size: 0.8rem;
-            color: #94a3b8;
-            line-height: 1.55;
-            margin-bottom: 20px;
-        }
-
-        /* ── Transitions ── */
-        .view-container {
-            animation: view-fade-in 0.35s ease-out;
-        }
-
-        @keyframes view-fade-in {
-            from { opacity: 0; transform: translateY(10px); }
-            to   { opacity: 1; transform: translateY(0); }
-        }
-
-        @keyframes glow-pulse {
-            0%, 100% { box-shadow: 0 0 4px currentColor; }
-            50%      { box-shadow: 0 0 12px currentColor; }
-        }
-
-        /* ── Scrollbar ── */
-        ::-webkit-scrollbar { width: 4px; }
-        ::-webkit-scrollbar-track { background: transparent; }
-        ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 4px; }
-        ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.15); }
-
-        /* ── Hidden helper ── */
-        .hidden { display: none !important; }
     </style>
 </head>
 <body>
-    <div class="app">
-        <!-- Header (always visible) -->
-        <div class="header">
-            <div style="color: #10b981; font-weight: bold; margin-bottom: 5px;">BUILD_ID_20260608</div>
-            <div class="logo">Zero-Magic</div>
-            <div class="badge badge-idle" id="state-badge">
-                <span class="badge-dot"></span>
-                <span id="badge-text">Idle</span>
+    <div class="terminal-window">
+        <!-- Loading Overlay -->
+        <div class="loading-overlay" id="loading-overlay">
+            <div class="pacman-container">
+                <div class="pacman">
+                    <div class="pacman-top"></div>
+                    <div class="pacman-bottom"></div>
+                </div>
+                <div class="dots-container">
+                    <div class="dot"></div>
+                    <div class="dot"></div>
+                    <div class="dot"></div>
+                    <div class="dot"></div>
+                </div>
             </div>
-            
-            <!-- DEBUG PANEL -->
-            <div id="debug-panel" style="background: red; color: white; padding: 10px; margin-top: 10px; border-radius: 5px; font-family: monospace; font-size: 12px; text-align: left;">
-                <div>State: <span id="debug-state">N/A</span></div>
-                <div>Revealed Hints: <span id="debug-revealed">N/A</span></div>
-                <div>Total Hints: <span id="debug-total">N/A</span></div>
-            </div>
+            <div class="loading-text" id="loading-text">Initializing Socratic Mission...</div>
         </div>
 
-        <!-- ═══ IDLE View ═══ -->
-        <div id="view-idle" class="view-container">
-            <div class="idle-container">
-                <div class="idle-icon">🧠</div>
-                <div class="idle-title">Ready to think</div>
-                <div class="idle-subtitle">
-                    Write some code and trigger an error.<br>
-                    Click the <code>💡 Help me think</code> lightbulb to start a Socratic mission.
-                </div>
+        <!-- Window Title Bar -->
+        <div class="title-bar">
+            <div class="window-controls">
+                <span class="control-dot dot-red"></span>
+                <span class="control-dot dot-yellow"></span>
+                <span class="control-dot dot-green"></span>
             </div>
+            <div class="window-title">zero-magic ~ /challenge</div>
         </div>
 
-        <!-- ═══ QUESTIONING View ═══ -->
-        <div id="view-questioning" class="view-container hidden">
-            <div class="card">
-                <div class="card-label">
-                    <span class="card-label-dot blue"></span>
-                    Mission Context
-                </div>
-                <p class="text-body" id="mission-description"></p>
+        <!-- content area -->
+        <div class="content">
+
+            <!-- MAIN PANEL -->
+            <div class="main-panel" id="main-panel">
+                <div class="section-header" id="panel-title">Welcome, developer.</div>
+                <div class="question-text" id="question-text">Before you can fix the error, what information do you need to gather?</div>
             </div>
 
-            <div class="card" style="border-color: rgba(16,185,129,0.15); background: rgba(16,185,129,0.02);">
-                <div class="card-label">
-                    <span class="card-label-dot green"></span>
-                    The Socratic Question
+            <!-- CAPABILITIES PANEL (Stats) -->
+            <div class="stats-panel">
+                <div class="section-header">Status</div>
+                <div class="stats-row">
+                    <span class="stats-key">Health</span>
+                    <span class="stats-val" id="hearts-capsule">
+                        <span class="heart-icon">♥</span>
+                        <span class="heart-icon">♥</span>
+                        <span class="heart-icon">♥</span>
+                    </span>
                 </div>
-                <p class="text-question" id="mission-question"></p>
-                <div style="display: flex; flex-direction: column; gap: 10px; margin-top: 18px;">
-                    <button class="btn btn-hint" id="btn-hint">
-                        💡 Reveal a Hint
-                        <span id="hint-counter" style="opacity:0.6; font-weight:400;"></span>
-                    </button>
-                    <button class="btn btn-abort">Abort Mission</button>
+                <div class="stats-row">
+                    <span class="stats-key">Hints</span>
+                    <span class="stats-val" id="hints-display">0 / 3</span>
                 </div>
-            </div>
-
-            <div class="attempts-bar">
-                <div>Language: <code id="mission-lang"></code></div>
-                <div>Attempts: <span class="attempts-count" id="attempts-count">0</span></div>
-            </div>
-        </div>
-
-        <!-- ═══ HINTING View ═══ -->
-        <div id="view-hinting" class="view-container hidden">
-            <div class="card">
-                <div class="card-label">
-                    <span class="card-label-dot blue"></span>
-                    Mission Context
-                </div>
-                <p class="text-body" id="hinting-description"></p>
-            </div>
-
-            <div class="card" style="border-color: rgba(16,185,129,0.15); background: rgba(16,185,129,0.02);">
-                <div class="card-label">
-                    <span class="card-label-dot green"></span>
-                    The Socratic Question
-                </div>
-                <p class="text-question" id="hinting-question"></p>
-            </div>
-
-            <div class="card" style="border-color: rgba(251,191,36,0.12); background: rgba(251,191,36,0.02);">
-                <div class="card-label">
-                    <span class="card-label-dot amber"></span>
-                    Hints Revealed
-                </div>
-                <ul class="hints-list" id="hints-list"></ul>
-                <div style="display: flex; flex-direction: column; gap: 10px; margin-top: 18px;">
-                    <button class="btn btn-hint" id="btn-more-hint">
-                        💡 Reveal Another Hint
-                        <span id="hint-counter-2" style="opacity:0.6; font-weight:400;"></span>
-                    </button>
-                    <button class="btn btn-hint hidden" id="btn-expert-solution" style="background: rgba(139,92,246,0.12); color: #8b5cf6; border-color: rgba(139,92,246,0.2);">
-                        💡 Show Expert Solution
-                    </button>
-                    <button class="btn btn-abort">Abort Mission</button>
+                <div class="stats-row">
+                    <span class="stats-key">Page</span>
+                    <span class="stats-val" id="page-display">1 of 3</span>
                 </div>
             </div>
 
-            <div class="attempts-bar">
-                <div>Language: <code id="hinting-lang"></code></div>
-                <div>Attempts: <span class="attempts-count" id="hinting-attempts">0</span></div>
-            </div>
-        </div>
-
-        <!-- ═══ TESTING View ═══ -->
-        <div id="view-testing" class="view-container hidden">
-            <div class="card" style="text-align: center; padding: 40px 20px;">
-                <div class="spinner"></div>
-                <div class="text-question" style="margin-top: 20px; color: #94a3b8;">Evaluating your solution...</div>
-            </div>
-            <button class="btn btn-retry" disabled>↻ Try Again</button>
-        </div>
-
-        <!-- ═══ PASSED View ═══ -->
-        <div id="view-passed" class="view-container hidden">
-            <div class="passed-container">
-                <div class="passed-icon">✓</div>
-                <div class="passed-title">Milestone Unlocked!</div>
-                <div class="passed-subtitle">
-                    You figured it out through your own reasoning.
-                    That's real understanding — not a copy-paste fix.
-                </div>
-            </div>
-            <div class="attempts-bar">
-                <div>Mission Complete</div>
-                <div>Total Attempts: <span class="attempts-count" id="passed-attempts">0</span></div>
-            </div>
-        </div>
-
-        <!-- ═══ FAILED View ═══ -->
-        <div id="view-failed" class="view-container hidden">
-            <div class="failed-container">
-                <div class="failed-icon">✗</div>
-                <div class="failed-title">Not quite yet</div>
-                <div class="failed-subtitle" id="failed-message">
-                    The test didn't pass, but that's okay.<br>
-                    Re-read the question, check the hints, and try again.
-                </div>
-                <div style="display: flex; flex-direction: column; gap: 10px; margin-top: 18px; width: 100%;">
-                    <button class="btn btn-retry" id="btn-retry-failed">↻ Try Again</button>
-                    <button class="btn btn-abort">Abort Mission</button>
-                </div>
-            </div>
-            <div class="attempts-bar">
-                <div>Keep going!</div>
-                <div>Attempts: <span class="attempts-count" id="failed-attempts">0</span></div>
-            </div>
-        </div>
-        
-        <!-- ═══ SOLUTION View ═══ -->
-        <div id="view-solution" class="view-container hidden">
-            <div class="card" style="border-color: rgba(139,92,246,0.15); background: rgba(139,92,246,0.02);">
-                <div class="card-label">
-                    <span class="card-label-dot" style="background: #8b5cf6;"></span>
-                    Expert Solution
-                </div>
-                <div id="solution-spinner" class="spinner" style="margin: 20px auto; display: block; border-top-color: #8b5cf6; border-color: rgba(139,92,246,0.2);"></div>
+            <!-- NAVIGATION PANEL (Actions) -->
+            <div class="actions-panel">
+                <div class="section-header">Actions</div>
                 
-                <div id="solution-content" class="hidden">
-                    <pre style="background: #0f172a; padding: 12px; border-radius: 8px; overflow-x: auto; margin: 10px 0;"><code id="solution-code" style="color: #e2e8f0; font-family: monospace; font-size: 0.8rem;"></code></pre>
-                    
-                    <div style="margin-top: 16px;">
-                        <div style="font-size: 0.8rem; font-weight: 600; color: #8b5cf6; margin-bottom: 4px;">Explanation</div>
-                        <p class="text-body" id="solution-explanation"></p>
-                    </div>
+                <!-- Hint + Solution Actions -->
+                <div class="action-row" id="action-row">
+                    <button class="btn btn-outline btn-green" id="btn-hint">> /hint</button>
+                    <button class="btn btn-solid btn-blue" id="btn-action">> /explain</button>
+                </div>
 
-                    <div style="margin-top: 16px;">
-                        <div style="font-size: 0.8rem; font-weight: 600; color: #10b981; margin-bottom: 4px;">What you learned</div>
-                        <p class="text-body" id="solution-concept"></p>
-                    </div>
+                <!-- Page 2 extra actions -->
+                <div class="extra-actions" id="extra-actions" style="display: none;">
+                    <button class="btn btn-solid" id="btn-resubmit">> /resubmit</button>
+                    <button class="btn btn-outline" id="btn-more-explanation">> /more_details</button>
                 </div>
-                
-                <div style="display: flex; flex-direction: column; gap: 10px; margin-top: 18px; width: 100%;">
-                    <button class="btn btn-abort">Close Mission</button>
+
+                <!-- Page 3 result box -->
+                <div class="result-box" id="result-box" style="display: none;"></div>
+
+                <!-- Navigation navigation-row -->
+                <div class="action-row">
+                    <button class="btn btn-outline" id="btn-nav">> /navigate_errors</button>
                 </div>
+            </div>
+
+            <!-- Terminal System Footer -->
+            <div class="system-footer">
+                [system] Zero-Magic Socratic Engine v1.0.0 active.
+                <br>
+                [system] Listening for code diagnostic changes.
             </div>
         </div>
     </div>
@@ -930,212 +1039,168 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
     <script nonce="${nonce}">
         const vscode = acquireVsCodeApi();
 
-        // ── State rendering ──
-        const views = {
-            IDLE:        document.getElementById('view-idle'),
-            QUESTIONING: document.getElementById('view-questioning'),
-            HINTING:     document.getElementById('view-hinting'),
-            TESTING:     document.getElementById('view-testing'),
-            PASSED:      document.getElementById('view-passed'),
-            FAILED:      document.getElementById('view-failed'),
-        };
+        const loadingOverlay = document.getElementById('loading-overlay');
+        const loadingText = document.getElementById('loading-text');
 
-        const badge       = document.getElementById('state-badge');
-        const badgeText   = document.getElementById('badge-text');
-        const badgeLabels = {
-            IDLE:        'Idle',
-            QUESTIONING: 'Socratic Mode Active',
-            HINTING:     'Hints Revealed',
-            TESTING:     'Evaluating',
-            PASSED:      'Mission Complete',
-            FAILED:      'Test Failed',
-        };
-
-        function showView(state) {
-            Object.entries(views).forEach(([key, el]) => {
-                el.classList.toggle('hidden', key !== state);
-            });
-
-            // Update badge
-            badge.className = 'badge badge-' + state.toLowerCase();
-            badgeText.textContent = badgeLabels[state] || state;
-        }
-
-        function renderState(data) {
-            const { state, mission, attempts, totalHints, revealedHints } = data;
-            console.log("[UI] Rendering state", state);
-            console.log("[DEBUG] incoming state:", state);
-            console.log("[DEBUG] incoming revealedHints:", revealedHints);
-            console.log("[DEBUG] incoming hints array:", mission ? mission.hints : 'no mission');
-
-            // Update debug panel
-            const debugState = document.getElementById('debug-state');
-            const debugRevealed = document.getElementById('debug-revealed');
-            const debugTotal = document.getElementById('debug-total');
-            if (debugState) debugState.textContent = state;
-            if (debugRevealed) debugRevealed.textContent = revealedHints;
-            if (debugTotal) debugTotal.textContent = totalHints;
-
-            showView(state);
-
-            if (state === 'QUESTIONING' && mission) {
-                document.getElementById('mission-description').textContent = mission.description;
-                document.getElementById('mission-question').textContent    = mission.socraticQuestion;
-                document.getElementById('mission-lang').textContent        = mission.language;
-                document.getElementById('attempts-count').textContent      = attempts;
-
-                const hintBtn = document.getElementById('btn-hint');
-                const counter = document.getElementById('hint-counter');
-                counter.textContent = '(' + revealedHints + '/' + totalHints + ')';
-                hintBtn.disabled = (revealedHints >= totalHints);
-            }
-
-            if (state === 'HINTING' && mission) {
-                document.getElementById('hinting-description').textContent = mission.description;
-                document.getElementById('hinting-question').textContent    = mission.socraticQuestion;
-                document.getElementById('hinting-lang').textContent        = mission.language;
-                document.getElementById('hinting-attempts').textContent    = attempts;
-
-                // Build hints list
-                const list = document.getElementById('hints-list');
-                list.innerHTML = '';
-                (mission.hints || []).forEach((hint, i) => {
-                    const li = document.createElement('li');
-                    li.className = 'hint-item';
-                    li.innerHTML = '<span class="hint-number">' + (i + 1) + '</span><span>' + escapeHtml(hint) + '</span>';
-                    list.appendChild(li);
-                });
-
-                const moreBtn = document.getElementById('btn-more-hint');
-                const counter2 = document.getElementById('hint-counter-2');
-                counter2.textContent = '(' + revealedHints + '/' + totalHints + ')';
-                moreBtn.disabled = (revealedHints >= totalHints);
-            }
-
-            if (state === 'TESTING') {
-                const el = document.getElementById('testing-attempts');
-                if (el) {
-                    el.textContent = attempts;
+        // Function to run a loading animation
+        function runLoader(durationMs, text, callback) {
+            loadingOverlay.classList.remove('hidden');
+            loadingText.textContent = text;
+            
+            setTimeout(() => {
+                loadingOverlay.classList.add('hidden');
+                if (callback) {
+                    callback();
                 }
-                // Button is inherently hidden because it's only in the FAILED view,
-                // but this satisfies the logic of disabling retry while testing.
-            }
-
-            if (state === 'PASSED') {
-                document.getElementById('passed-attempts').textContent = attempts;
-            }
-
-            if (state === 'FAILED') {
-                document.getElementById('failed-attempts').textContent = attempts;
-                if (data.customFailedMessage) {
-                    document.getElementById('failed-message').textContent = data.customFailedMessage;
-                } else {
-                    document.getElementById('failed-message').innerHTML = "The test didn't pass, but that's okay.<br>Re-read the question, check the hints, and try again.";
-                }
-            }
-
-            console.log('[VERIFY]', document.getElementById('hints-list')?.innerHTML);
+            }, durationMs);
         }
 
-        function escapeHtml(text) {
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
-        }
-
-        // ── Outbound messages to extension ──
-        function requestHint() {
-            console.log("[UI] Hint button clicked");
-            console.log("[UI] Sending REQUEST_HINT");
-            vscode.postMessage({ type: 'REQUEST_HINT' });
-        }
-
-        function retry() {
-            vscode.postMessage({ type: 'RETRY' });
-        }
-
-        function abort() {
-            vscode.postMessage({ type: 'ABORT' });
-        }
-
-        // Register event listeners immediately
-        console.log('[DEBUG] document.readyState:', document.readyState);
-
-        document.addEventListener('click', e => {
-            console.log('[GLOBAL CLICK]', e.target);
-        });
-
-        document.body.addEventListener('click', e => {
-            console.log('[BODY CLICK]', e.target);
+        // Run introduction loader on start
+        window.addEventListener('DOMContentLoaded', () => {
+            runLoader(3000, "Initializing Socratic Mission...");
         });
 
         const btnHint = document.getElementById('btn-hint');
-        console.log('[DEBUG] btnHint found:', !!btnHint);
-        if (btnHint) {
-            const rect = btnHint.getBoundingClientRect();
-            const computedStyle = window.getComputedStyle(btnHint);
-            console.log('[DEBUG] btnHint rect:', rect.width, rect.height, rect.top, rect.left);
-            console.log('[DEBUG] btnHint pointer-events:', computedStyle.pointerEvents);
-            console.log('[DEBUG] btnHint opacity:', computedStyle.opacity);
-            console.log('[DEBUG] btnHint disabled:', btnHint.disabled);
-
-            btnHint.addEventListener('mousedown', () => console.log('[DEBUG] btnHint mousedown'));
-            btnHint.addEventListener('mouseup', () => console.log('[DEBUG] btnHint mouseup'));
-
-            btnHint.addEventListener('click', () => {
-                console.log('[DEBUG] Actual click handler fired for btnHint');
-                requestHint();
-            });
-            console.log('[DEBUG] Listener attached to btn-hint');
-        }
-
-        const btnMoreHint = document.getElementById('btn-more-hint');
-        if (btnMoreHint) {
-            btnMoreHint.addEventListener('click', () => {
-                console.log('[DEBUG] Actual click handler fired for btnMoreHint');
-                requestHint();
-            });
-            console.log('[DEBUG] Listener attached to btn-more-hint');
-        }
-
-        const btnRetryFailed = document.getElementById('btn-retry-failed');
-        if (btnRetryFailed) {
-            btnRetryFailed.addEventListener('click', () => {
-                console.log('[DEBUG] Actual click handler fired for btnRetryFailed');
-                retry();
-            });
-            console.log('[DEBUG] Listener attached to btn-retry-failed');
-        }
-
-        const btnAborts = document.querySelectorAll('.btn-abort');
-        btnAborts.forEach((btn, idx) => {
-            btn.addEventListener('click', () => {
-                console.log('[DEBUG] Actual click handler fired for btnAbort idx=' + idx);
-                abort();
-            });
-            console.log('[DEBUG] Listener attached to btn-abort idx=' + idx);
+        btnHint.addEventListener('click', () => {
+            vscode.postMessage({ type: 'REQUEST_HINT' });
         });
 
-        // ── Inbound messages from extension ──
+        const btnAction = document.getElementById('btn-action');
+        btnAction.addEventListener('click', () => {
+            const text = btnAction.textContent || "";
+            const isSubmit = text.indexOf('submit') !== -1 || text.indexOf('Submit') !== -1;
+            if (isSubmit) {
+                runLoader(1500, "Running diagnostic verification...", () => {
+                    vscode.postMessage({ type: 'SUBMIT_ANSWER' });
+                });
+            } else {
+                runLoader(1500, "Deconstructing logic...", () => {
+                    vscode.postMessage({ type: 'REQUEST_SOLUTION' });
+                });
+            }
+        });
+
+        const btnResubmit = document.getElementById('btn-resubmit');
+        btnResubmit.addEventListener('click', () => {
+            runLoader(1500, "Running diagnostic verification...", () => {
+                vscode.postMessage({ type: 'SUBMIT_ANSWER' });
+            });
+        });
+
+        const btnMoreExplanation = document.getElementById('btn-more-explanation');
+        btnMoreExplanation.addEventListener('click', () => {
+            runLoader(1500, "Extracting more details...", () => {
+                vscode.postMessage({ type: 'MORE_EXPLANATION' });
+            });
+        });
+
+        let navDirection = 'next';
+        const btnNav = document.getElementById('btn-nav');
+        btnNav.addEventListener('click', () => {
+            vscode.postMessage({ type: 'NAVIGATE_ERROR', direction: navDirection });
+            navDirection = navDirection === 'next' ? 'prev' : 'next';
+        });
+
         window.addEventListener('message', event => {
             const message = event.data;
             if (message.type === 'STATE_UPDATE') {
-                console.log("[UI] State received", message.state);
-            }
+                const { page, hearts, hintsUsed, totalHints, revealedHints, hasFailedSubmit, mission, expertSolution, attempts, timeElapsed } = message;
 
-            if (message.type === 'STATE_UPDATE') {
-                renderState(message);
-            }
+                // Update Page Indicator display
+                const pageDisplay = document.getElementById('page-display');
+                if (pageDisplay) {
+                    pageDisplay.textContent = page + " of 3";
+                }
 
-            // Support Phase 6 UNLOCK message (backwards compat with dashboard.ts)
-            if (message.type === 'UNLOCK') {
-                showView('PASSED');
-                badgeText.textContent = 'Milestone Unlocked';
+                // Update Panel Title & Main Panel Content
+                const panelTitle = document.getElementById('panel-title');
+                const questionText = document.getElementById('question-text');
+
+                if (page === 1) {
+                    panelTitle.textContent = "Question";
+                    questionText.innerHTML = mission ? mission.socraticQuestion : "Before you can fix the error, what information do you need to gather?";
+                } else if (page === 2) {
+                    panelTitle.textContent = "Explanation";
+                    questionText.innerHTML = expertSolution ? expertSolution.explanation.replace(/\\n/g, '<br>') : "Detailed Explanation of the error";
+                } else if (page === 3) {
+                    panelTitle.textContent = "Mission end";
+                    if (hearts > 0) {
+                        questionText.innerHTML = "PASSED\\n\\nSummary of Debugging Process and Learning:\\n" + (expertSolution ? expertSolution.conceptSummary : "Good job fixing the error!");
+                    } else {
+                        questionText.innerHTML = "FAILED\\n\\n..... sorry but u have end with hearts you need to improve your basics";
+                    }
+                }
+
+                // Update Hearts Capsule
+                const heartsCapsule = document.getElementById('hearts-capsule');
+                heartsCapsule.innerHTML = '';
+                for (let i = 0; i < 3; i++) {
+                    const span = document.createElement('span');
+                    span.className = 'heart-icon';
+                    if (i < hearts) {
+                        span.textContent = '♥';
+                        span.style.color = '#ff5f56';
+                    } else {
+                        span.textContent = '♡';
+                        span.style.color = 'rgba(166, 172, 205, 0.2)';
+                    }
+                    heartsCapsule.appendChild(span);
+                }
+
+                // Update Hints Display
+                const hintsDisplay = document.getElementById('hints-display');
+                if (hintsDisplay) {
+                    hintsDisplay.textContent = revealedHints + " / " + totalHints;
+                }
+
+                // Update Buttons
+                btnHint.textContent = '> /hint (' + revealedHints + '/' + totalHints + ')';
+
+                const actionRow = document.getElementById('action-row');
+                const extraActions = document.getElementById('extra-actions');
+                const resultBox = document.getElementById('result-box');
+
+                if (page === 1) {
+                    actionRow.style.display = 'flex';
+                    extraActions.style.display = 'none';
+                    resultBox.style.display = 'none';
+                    btnAction.textContent = "> /explain";
+                } else if (page === 2) {
+                    actionRow.style.display = 'flex';
+                    btnAction.textContent = "> /submit";
+                    
+                    if (hasFailedSubmit) {
+                        extraActions.style.display = 'flex';
+                    } else {
+                        extraActions.style.display = 'none';
+                    }
+                    resultBox.style.display = 'none';
+                } else if (page === 3) {
+                    actionRow.style.display = 'none';
+                    extraActions.style.display = 'none';
+                    resultBox.style.display = 'block';
+
+                    if (hearts > 0) {
+                        resultBox.innerHTML = '<div class="success-banner">' +
+                            '<p>🎉 CONGRATULATIONS! 🎉</p>' +
+                            '<p style="font-size: 0.8rem; margin-top: 6px;">' +
+                                'You solved the challenge with ' + hearts + ' hearts remaining.' +
+                            '</p>' +
+                            '<p style="font-size: 0.75rem; margin-top: 4px;">' +
+                                'Time taken: ' + timeElapsed + 's | Hints used: ' + hintsUsed +
+                            '</p>' +
+                        '</div>';
+                    } else {
+                        resultBox.innerHTML = '<div class="fail-banner">' +
+                            '<p>💔 MISSION FAILED 💔</p>' +
+                            '<p style="font-size: 0.8rem; margin-top: 6px;">' +
+                                'No hearts remaining. Review the core concepts and try again!' +
+                            '</p>' +
+                        '</div>';
+                    }
+                }
             }
         });
-
-        // Ask extension for current state on first load
-        vscode.postMessage({ type: 'REQUEST_STATE' });
     </script>
 </body>
 </html>`;
