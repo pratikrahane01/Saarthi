@@ -223,3 +223,19 @@ class SolutionResponse(BaseModel):
     fixedCode: str = Field(...)
     explanation: str = Field(...)
     conceptSummary: str = Field(...)
+
+# ---------------------------------------------------------------------------
+# File Analysis Request Model
+# ---------------------------------------------------------------------------
+
+class FileAnalysisRequest(BaseModel):
+    language: str = Field(
+        ...,
+        description="The programming language of the full file context.",
+        examples=["python", "javascript", "typescript"],
+    )
+    fullCode: str = Field(
+        ...,
+        description="The complete source code of the file.",
+        examples=["def main():\n    print('hello world')"],
+    )

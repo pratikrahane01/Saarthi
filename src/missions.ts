@@ -320,3 +320,71 @@ export async function fetchExpertSolution(requestBody: SolutionRequest): Promise
         return null;
     }
 }
+
+/**
+ * Sends the entire active file content to the backend for Socratic analysis.
+ */
+export async function matchWholeFileToMission(fullCode: string, languageId: string, filePath: string): Promise<Mission | null> {
+    const url = 'http://127.0.0.1:8000/v1/missions/analyze-file';
+    
+    LOG.appendLine(`[matchWholeFileToMission] POST ${url}`);
+    LOG.appendLine(`  → language : ${languageId}`);
+    LOG.appendLine(`  → fullCode length : ${fullCode.length}`);
+
+    let response: Response;
+    try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 15000); // 15s timeout for full file LLM
+
+        response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ language: languageId, fullCode }),
+            signal: controller.signal,
+        });
+
+        clearTimeout(timeoutId);
+    } catch (networkError: unknown) {
+        const msg = networkError instanceof Error ? networkError.message : String(networkError);
+        LOG.appendLine(`[matchWholeFileToMission] ⚠ Network error — backend unreachable: ${msg}`);
+        vscode.window.setStatusBarMessage('⚠️ Zero-Magic: Backend server unreachable.', 6000);
+        return null;
+    }
+
+    if (!response.ok) {
+        const bodyText = await response.text().catch(() => '(unreadable)');
+        LOG.appendLine(`[matchWholeFileToMission] ✗ HTTP ${response.status} from backend: ${bodyText.substring(0, 200)}`);
+        vscode.window.setStatusBarMessage(`⚠️ Zero-Magic: Backend error (HTTP ${response.status}).`, 5000);
+        return null;
+    }
+
+    let rawJson: unknown;
+    try {
+        rawJson = await response.json();
+    } catch (parseError) {
+        LOG.appendLine(`[matchWholeFileToMission] ✗ Failed to parse JSON response: ${parseError}`);
+        return null;
+    }
+
+    let validated: MissionResponse;
+    try {
+        validated = validateMissionResponse(rawJson);
+    } catch (validationError: unknown) {
+        const msg = validationError instanceof Error ? validationError.message : String(validationError);
+        LOG.appendLine(`[matchWholeFileToMission] ✗ Response validation failed: ${msg}`);
+        return null;
+    }
+
+    // Mock an event for mapping
+    const mockEvent: DiagnosticEvent = {
+        filePath: filePath,
+        languageId: languageId,
+        errorMessage: "Full File Analysis",
+        lineText: "",
+        lineNumber: 0
+    };
+
+    const mission = mapResponseToMission(validated, mockEvent, "FILE_ANALYSIS");
+    LOG.appendLine(`[matchWholeFileToMission] ✓ File Mission matched: id="${mission.id}" title="${mission.title}"`);
+    return mission;
+}

@@ -28,7 +28,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, status
 
-from backend.models import MissionRequest, MissionResponse, SolutionRequest, SolutionResponse
+from backend.models import MissionRequest, MissionResponse, SolutionRequest, SolutionResponse, FileAnalysisRequest
 from backend.services import (
     lookup_mission,
     generate_hidden_test,
@@ -266,6 +266,45 @@ async def reveal_solution(request_body: SolutionRequest, request: Request) -> So
         fixedCode=result.fixedCode,
         explanation=result.explanation,
         conceptSummary=result.conceptSummary
+    )
+
+
+# ---------------------------------------------------------------------------
+# POST /v1/missions/analyze-file
+# ---------------------------------------------------------------------------
+
+@router.post(
+    "/analyze-file",
+    response_model=MissionResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Analyze full file and generate a Socratic mission",
+)
+async def analyze_file(request_body: FileAnalysisRequest, request: Request) -> MissionResponse:
+    request_id = _request_id(request)
+    logger.info(
+        "[%s] POST /analyze-file | language=%r length=%d",
+        request_id,
+        request_body.language,
+        len(request_body.fullCode),
+    )
+
+    dynamic_mission = groq_service.generate_file_mission(
+        language=request_body.language,
+        full_code=request_body.fullCode,
+    )
+
+    import re
+    raw_id = f"file_{request_body.language}_{hash(request_body.fullCode) % 10000}"
+    mission_id = re.sub(r'[^a-z0-9_]', '_', raw_id.lower())
+
+    return MissionResponse(
+        missionId=mission_id,
+        title="Full Program Analysis",
+        concept=dynamic_mission.concept,
+        questions=dynamic_mission.questions,
+        hints=dynamic_mission.hints,
+        framework="pytest" if request_body.language.lower() == "python" else "jest",
+        hiddenTest="def test_file_analysis_placeholder():\n    assert True, 'File analysis complete'",
     )
 
 

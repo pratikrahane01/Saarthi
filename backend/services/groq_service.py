@@ -236,3 +236,83 @@ def generate_expert_solution(language: str, error_code: str, source_code: str, m
             explanation="An unexpected error occurred while generating the solution.",
             conceptSummary="Please try again or refer to documentation."
         )
+
+# ---------------------------------------------------------------------------
+# File-Level Socratic Analysis
+# ---------------------------------------------------------------------------
+
+def generate_file_mission(language: str, full_code: str) -> DynamicMissionResult:
+    """
+    Call the Groq API to dynamically generate a Socratic mission based on the
+    entire source code file.
+    """
+    api_key = os.environ.get("GROQ_API_KEY")
+    if not api_key or Groq is None:
+        logger.warning("Groq API key not found or groq package missing. Using generic fallback.")
+        return _build_generic_mission(language, "FILE_ANALYSIS")
+
+    client = Groq(api_key=api_key)
+
+    system_prompt = (
+        "You are Socrates, an AI debugging mentor.\n\n"
+        "Rules:\n\n"
+        "1. Never provide corrected code.\n"
+        "2. Never provide direct fixes.\n"
+        "3. Analyze the provided full program.\n"
+        "4. Identify the most important concept the student should learn or a potential bug.\n"
+        "5. Explain this underlying concept briefly.\n"
+        "6. Ask one Socratic question to guide the student.\n"
+        "7. Generate:\n"
+        "   - Hint Level 1\n"
+        "   - Hint Level 2\n"
+        "   - Hint Level 3\n\n"
+        "Return JSON only.\n\n"
+        "Focus on teaching debugging skills and software design.\n\n"
+        "REQUIRED JSON FORMAT:\n"
+        "{\n"
+        "  \"concept\": \"...\",\n"
+        "  \"question\": \"...\",\n"
+        "  \"hintLevel1\": \"...\",\n"
+        "  \"hintLevel2\": \"...\",\n"
+        "  \"hintLevel3\": \"...\"\n"
+        "}"
+    )
+
+    user_prompt = (
+        f"Language: {language}\n\n"
+        f"Full Source Code:\n```\n{full_code}\n```\n\n"
+        "Generate the Socratic JSON response for this file."
+    )
+
+    try:
+        response = client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.7,
+            max_tokens=600,
+        )
+
+        content = response.choices[0].message.content
+        if not content:
+            raise ValueError("Empty response from Groq")
+
+        data = json.loads(content)
+
+        required_keys = ["concept", "question", "hintLevel1", "hintLevel2", "hintLevel3"]
+        for key in required_keys:
+            if key not in data or not isinstance(data[key], str):
+                raise ValueError(f"Missing or invalid field in Groq response: {key}")
+
+        return DynamicMissionResult(
+            concept=data["concept"],
+            questions=[data["question"], "Which part of the file should you review first?"],
+            hints=[data["hintLevel1"], data["hintLevel2"], data["hintLevel3"]]
+        )
+
+    except Exception as exc:
+        logger.error("Unexpected error during Groq file analysis generation: %s", exc)
+        return _build_generic_mission(language, "FILE_ANALYSIS")
