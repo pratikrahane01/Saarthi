@@ -285,6 +285,7 @@ export async function executeMissionHandOff(mission: Mission) {
         // ── Step 1: Render the Socratic UI immediately (don't wait for tests) ───────
         // The student sees the question + hints while the test runner works in
         // the background. This keeps the UX responsive.
+        await vscode.commands.executeCommand('zeroMagic.socraticSidebar.focus');
         await vscode.commands.executeCommand('zeroMagic.renderSocraticDashboard', mission);
 
         // ── Phase 9: Clean up any old tests from previous missions
@@ -406,16 +407,18 @@ export async function matchWholeFileToMission(fullCode: string, languageId: stri
         return null;
     }
 
-    // Mock an event for mapping
-    const mockEvent: DiagnosticEvent = {
-        filePath: filePath,
-        languageId: languageId,
-        errorMessage: "Full File Analysis",
-        lineText: "",
-        lineNumber: 0
+    // Mock a context for mapping
+    const mockContext: BuiltContext = {
+        language: languageId,
+        errorCode: "FILE_ANALYSIS",
+        diagnosticMessage: "Full File Analysis",
+        activeFilePath: filePath,
+        sourceCode: fullCode,
+        terminalOutput: "",
+        exitCode: -1
     };
 
-    const mission = mapResponseToMission(validated, mockEvent, "FILE_ANALYSIS");
+    const mission = mapResponseToMission(validated, mockContext, "FILE_ANALYSIS");
     LOG.appendLine(`[matchWholeFileToMission] ✓ File Mission matched: id="${mission.id}" title="${mission.title}"`);
     return mission;
 }

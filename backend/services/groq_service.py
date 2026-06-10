@@ -130,7 +130,8 @@ def generate_dynamic_mission(
         "6. When terminal output is provided, your questions and hints MUST reference "
         "specific lines, variable names, or values seen in that output.\n"
         "7. When source code is provided, reference specific line numbers or "
-        "identifiers from the code in your question.\n\n"
+        "identifiers from the code in your question.\n"
+        "8. IGNORE all commented out lines of code (such as those starting with #, //, or enclosed in ''' or \"\"\").\n\n"
         "Return JSON only.\n\n"
         "REQUIRED JSON FORMAT:\n"
         "{\n"
@@ -143,8 +144,8 @@ def generate_dynamic_mission(
     )
 
     # Build the user prompt using priority: terminal_output > message > error_code
-    terminal_clean = terminal_output.strip()
-    source_clean   = source_code.strip()
+    source_clean = strip_comments(source_code, language) if source_code else ""
+    terminal_clean = terminal_output.strip() if terminal_output else ""
 
     if terminal_clean:
         # Highest-priority: actual runtime output + source code
@@ -250,7 +251,8 @@ def generate_expert_solution(language: str, error_code: str, source_code: str, m
         "1. Provide the corrected source code in full, or the exact snippet required if it's large.\n"
         "2. Explain what was wrong and how you fixed it.\n"
         "3. Provide a brief concept summary of the underlying principle.\n"
-        "4. Return JSON only.\n\n"
+        "4. IGNORE all commented out lines of code (such as those starting with #, //, or enclosed in ''' or \"\"\").\n"
+        "5. Return JSON only.\n\n"
         "REQUIRED JSON FORMAT:\n"
         "{\n"
         "  \"fixedCode\": \"...\",\n"
@@ -259,11 +261,12 @@ def generate_expert_solution(language: str, error_code: str, source_code: str, m
         "}"
     )
 
+    clean_source = strip_comments(source_code, language) if source_code else ""
     user_prompt = (
         f"Language: {language}\n"
         f"Error Code: {error_code}\n"
         f"Error Message: {message}\n\n"
-        f"Source Code:\n```\n{source_code}\n```\n\n"
+        f"Source Code:\n```\n{clean_source}\n```\n\n"
         "Generate the JSON response with the expert solution."
     )
 
@@ -309,6 +312,26 @@ def generate_expert_solution(language: str, error_code: str, source_code: str, m
 # File-Level Socratic Analysis
 # ---------------------------------------------------------------------------
 
+import re
+
+def strip_comments(code: str, language: str) -> str:
+    """Removes comments from code to prevent LLM hallucination on commented blocks."""
+    if language.lower() in ["python"]:
+        # Remove multi-line strings used as comments
+        code = re.sub(r"'''[\s\S]*?'''", "", code)
+        code = re.sub(r'\"\"\"[\s\S]*?\"\"\"', "", code)
+        # Remove single-line comments
+        code = re.sub(r"#.*", "", code)
+    elif language.lower() in ["javascript", "typescript", "ts", "js"]:
+        # Remove multi-line comments
+        code = re.sub(r"/\*[\s\S]*?\*/", "", code)
+        # Remove single-line comments
+        code = re.sub(r"//.*", "", code)
+    
+    # Remove excessive blank lines left behind
+    code = re.sub(r'\n\s*\n', '\n', code)
+    return code.strip()
+
 def generate_file_mission(language: str, full_code: str) -> DynamicMissionResult:
     """
     Call the Groq API to dynamically generate a Socratic mission based on the
@@ -320,6 +343,9 @@ def generate_file_mission(language: str, full_code: str) -> DynamicMissionResult
         return _build_generic_mission(language, "FILE_ANALYSIS")
 
     client = Groq(api_key=api_key)
+    
+    # Pre-process code to force LLM to ignore comments
+    clean_code = strip_comments(full_code, language)
 
     system_prompt = (
         "You are Socrates, an AI debugging mentor.\n\n"
@@ -333,7 +359,8 @@ def generate_file_mission(language: str, full_code: str) -> DynamicMissionResult
         "7. Generate:\n"
         "   - Hint Level 1\n"
         "   - Hint Level 2\n"
-        "   - Hint Level 3\n\n"
+        "   - Hint Level 3\n"
+        "8. IGNORE all commented out lines of code (such as those starting with #, //, or enclosed in ''' or \"\"\").\n\n"
         "Return JSON only.\n\n"
         "Focus on teaching debugging skills and software design.\n\n"
         "REQUIRED JSON FORMAT:\n"
@@ -348,7 +375,7 @@ def generate_file_mission(language: str, full_code: str) -> DynamicMissionResult
 
     user_prompt = (
         f"Language: {language}\n\n"
-        f"Full Source Code:\n```\n{full_code}\n```\n\n"
+        f"Full Source Code:\n```\n{clean_code}\n```\n\n"
         "Generate the Socratic JSON response for this file."
     )
 

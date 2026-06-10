@@ -13,6 +13,8 @@ from .llm_service import LLMEnrichment, enrich_mission
 from . import groq_service
 from . import context_service
 from .context_service import ResolvedContext, ContextSource, resolve_primary_context, build_groq_context_block
+from . import tier_classifier_service
+from .tier_classifier_service import TierClassification, classify_error_tier
 
 __all__ = [
     # mission lookup
@@ -33,5 +35,8 @@ __all__ = [
     "ResolvedContext",
     "ContextSource",
     "resolve_primary_context",
-    "build_groq_context_block",
+    # tier classification (GROQ_API_KEY1 powered)
+    "tier_classifier_service",
+    "TierClassification",
+    "classify_error_tier",
 ]

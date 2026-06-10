@@ -28,7 +28,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, status
 
-from backend.models import MissionRequest, MissionResponse, SolutionRequest, SolutionResponse, FileAnalysisRequest
+from backend.models import MissionRequest, MissionResponse, SolutionRequest, SolutionResponse, FileAnalysisRequest, TierClassifyRequest, TierClassifyResponse
 from backend.services import (
     lookup_mission,
     generate_hidden_test,
@@ -37,8 +37,9 @@ from backend.services import (
     resolve_primary_context,
     build_groq_context_block,
 )
-from backend.services.mission_service import LookupStatus, MissionLookupError
 from backend.services.hidden_test_service import HiddenTestGenerationError
+from backend.services.mission_service import LookupStatus, MissionLookupError
+from backend.services import tier_classifier_service
 from backend.repository import list_all
 
 logger = logging.getLogger("zero_magic.router.missions")
@@ -329,6 +330,76 @@ async def analyze_file(request_body: FileAnalysisRequest, request: Request) -> M
         hints=dynamic_mission.hints,
         framework="pytest" if request_body.language.lower() == "python" else "jest",
         hiddenTest="def test_file_analysis_placeholder():\n    assert True, 'File analysis complete'",
+    )
+
+
+# ---------------------------------------------------------------------------
+# POST /v1/missions/classify-tier  — Groq-powered tier router
+# ---------------------------------------------------------------------------
+
+@router.post(
+    "/classify-tier",
+    response_model=TierClassifyResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Classify error severity tier using GROQ_API_KEY1",
+    description=(
+        "Accepts error context from the VS Code extension and returns a tier "
+        "classification (1 / 2 / 3) that drives which sidebar card to render.\n\n"
+        "**Decision order**\n"
+        "1. Regex fast-path — SyntaxError / traceback patterns → instant result.\n"
+        "2. LLM (GROQ_API_KEY1) — semantic analysis for ambiguous errors.\n"
+        "3. Safe fallback → Tier 2 (always shows the analysis card).\n\n"
+        "**Tiers**\n"
+        "- Tier 1: Syntax / Import / Typo → lightweight nudge card, no Deep Dive.\n"
+        "- Tier 2: Logic / Type / Async → analysis card + opt-in Deep Dive button.\n"
+        "- Tier 3: Runtime crash / traceback → auto-trigger Deep Dive."
+    ),
+    responses={
+        200: {"description": "Tier classification result."},
+        422: {"description": "Request body failed validation."},
+        500: {"description": "Unexpected internal error."},
+    },
+)
+async def classify_tier(
+    request_body: TierClassifyRequest,
+    request: Request,
+) -> TierClassifyResponse:
+    """Classify an error diagnostic into Tier 1, 2, or 3."""
+    request_id = _request_id(request)
+
+    logger.info(
+        "[%s] POST /classify-tier | language=%r  errorCode=%r  line=%d  "
+        "hasTerminal=%s",
+        request_id,
+        request_body.language,
+        request_body.errorCode,
+        request_body.lineNumber,
+        bool(request_body.terminalOutput),
+    )
+
+    result = tier_classifier_service.classify_error_tier(
+        language=request_body.language,
+        error_code=request_body.errorCode,
+        message=request_body.message,
+        terminal_output=request_body.terminalOutput,
+        source_code=request_body.sourceCode,
+        line_number=request_body.lineNumber,
+    )
+
+    logger.info(
+        "[%s] Tier classified: tier=%d  source=%s  flag=%r",
+        request_id,
+        result.tier,
+        result.source,
+        result.error_flag[:60],
+    )
+
+    return TierClassifyResponse(
+        tier=result.tier,
+        errorFlag=result.error_flag,
+        proTip=result.pro_tip,
+        explanation=result.explanation,
+        source=result.source,
     )
 
 

@@ -1123,6 +1123,7 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
         // Run introduction loader on start
         window.addEventListener('DOMContentLoaded', () => {
             runLoader(3000, "Initializing Socratic Mission...");
+            vscode.postMessage({ type: 'REQUEST_STATE' });
         });
 
         const btnHint = document.getElementById('btn-hint');
@@ -1224,7 +1225,7 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                 const questionText = document.getElementById('question-text');
 
                 if (page === 1) {
-                    panelTitle.textContent = "Question";
+                    panelTitle.textContent = "Explanation";
                     questionText.innerHTML = mission ? mission.socraticQuestion : "Before you can fix the error, what information do you need to gather?";
                 } else if (page === 2) {
                     panelTitle.textContent = "Explanation";
