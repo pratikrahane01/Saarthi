@@ -200,7 +200,7 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
 
     private async _onRequestSolution() {
         if (!this._currentMission) return;
-        
+
         let sourceCode = '';
         if (this._currentMission.targetUri) {
             try {
@@ -228,7 +228,7 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                 conceptSummary: "Please check if the backend server is running."
             };
         }
-        
+
         // Generate challenge file
         try {
             const targetPath = vscode.Uri.parse(this._currentMission.targetUri).fsPath;
@@ -239,7 +239,7 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
 
             const commentPrefix = this._currentMission.language === 'python' ? '# ' : '// ';
             const explanationLines = this._expertSolution.explanation.split('\n').map(line => `${commentPrefix}${line}`);
-            
+
             const fileContent = [
                 `${commentPrefix}=====================================================================`,
                 `${commentPrefix}ZERO-MAGIC SOCRATIC CHALLENGE`,
@@ -269,7 +269,7 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
         this._currentPage = 2;
         this._hearts = 3;
         this._hasFailedSubmit = false;
-        this._currentState = 'SOLUTION'; 
+        this._currentState = 'SOLUTION';
         this._postState();
     }
 
@@ -293,7 +293,7 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                 const commentPrefix = this._currentMission.language === 'python' ? '# ' : '// ';
                 const nextHintText = this._currentMission.hints[this._revealedHints - 1] || "Check the syntax and logic carefully.";
                 const extraComment = `\n${commentPrefix}---------------------------------------------------------------------\n${commentPrefix}EXTRA HINT (Heart Consumed):\n${commentPrefix}${nextHintText}\n${commentPrefix}---------------------------------------------------------------------\n`;
-                
+
                 // Insert it after the instructions banner separator
                 const separator = `=====================================================================`;
                 const parts = text.split(separator);
@@ -303,7 +303,7 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                 } else {
                     newText = extraComment + text;
                 }
-                
+
                 await vscode.workspace.fs.writeFile(this._socraticChallengeUri, Buffer.from(newText, 'utf8'));
             } catch (e) {
                 console.error("Could not append extra hint to challenge file", e);
@@ -316,13 +316,13 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
     private async _cycleErrors(direction: 'next' | 'prev') {
         const diagnostics = vscode.languages.getDiagnostics();
         const errorEvents: any[] = [];
-        
+
         for (const [uri, diags] of diagnostics) {
             const errors = diags.filter(d => d.severity === vscode.DiagnosticSeverity.Error);
             for (const err of errors) {
                 // Skip the socratic challenge file itself when navigating to avoid loops
                 if (uri.fsPath.includes('socratic_challenge')) continue;
-                
+
                 errorEvents.push({
                     uri,
                     filePath: uri.fsPath,
@@ -333,17 +333,17 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                 });
             }
         }
-        
+
         if (errorEvents.length === 0) {
             vscode.window.showInformationMessage("No active compiler errors found in the workspace!");
             return;
         }
-        
+
         let currentIndex = -1;
         if (this._currentMission) {
             currentIndex = errorEvents.findIndex(e => e.errorMessage === this._currentMission?.originalMessage);
         }
-        
+
         let newIndex = 0;
         if (currentIndex !== -1) {
             if (direction === 'next') {
@@ -354,14 +354,14 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
         } else {
             newIndex = 0;
         }
-        
+
         const nextError = errorEvents[newIndex];
-        
+
         try {
             const doc = await vscode.workspace.openTextDocument(nextError.uri);
             nextError.languageId = doc.languageId;
             nextError.lineText = doc.lineAt(nextError.lineNumber).text;
-            
+
             await vscode.commands.executeCommand('zeroMagic.triggerSocraticHelp', nextError);
         } catch (e) {
             console.error("Failed to cycle errors:", e);
@@ -370,20 +370,20 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
 
     private async _saveStepHistory(passed: boolean) {
         if (!this._currentMission) return;
-        
+
         try {
             const workspaceFolders = vscode.workspace.workspaceFolders;
             if (!workspaceFolders || workspaceFolders.length === 0) return;
-            
+
             const rootUri = workspaceFolders[0].uri;
             const historyDir = vscode.Uri.joinPath(rootUri, '.zero_magic');
             const historyUri = vscode.Uri.joinPath(historyDir, 'history.txt');
-            
+
             await vscode.workspace.fs.createDirectory(historyDir);
-            
+
             const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
             const timeTaken = this._startTime ? Math.round((Date.now() - this._startTime) / 1000) : 0;
-            
+
             const entry = [
                 `==================================================`,
                 `ZERO-MAGIC SESSION SUMMARY - ${timestamp}`,
@@ -400,7 +400,7 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                 `Result          : ${passed ? 'PASSED (Success)' : 'FAILED (Run out of hearts)'}`,
                 `==================================================\n\n`
             ].join('\n');
-            
+
             let existingContent = '';
             try {
                 const data = await vscode.workspace.fs.readFile(historyUri);
@@ -408,7 +408,7 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             } catch (e) {
                 // File does not exist yet
             }
-            
+
             await vscode.workspace.fs.writeFile(historyUri, Buffer.from(entry + existingContent, 'utf8'));
         } catch (err) {
             console.error("Failed to save step history:", err);
@@ -443,18 +443,18 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             let finalPassed = result.passed;
             let twoFactorFailedMessage: string | undefined;
 
-            const checkUri = this._socraticChallengeUri || (mission.targetUri ? vscode.Uri.parse(mission.targetUri) : undefined);
+            const checkUri = mission.targetUri ? vscode.Uri.parse(mission.targetUri) : undefined;
             if (result.passed && checkUri) {
                 const diagnostics = vscode.languages.getDiagnostics(checkUri);
-                
-                const hasOriginalError = diagnostics.some(d => 
-                    d.severity === vscode.DiagnosticSeverity.Error && 
+
+                const hasOriginalError = diagnostics.some(d =>
+                    d.severity === vscode.DiagnosticSeverity.Error &&
                     (d.message === mission.originalMessage || d.message.includes(mission.originalErrorCode))
                 );
 
                 if (hasOriginalError) {
                     finalPassed = false;
-                    twoFactorFailedMessage = "You understood the concept, but the original error is still present. Apply the fix to your code and try again.";
+                    twoFactorFailedMessage = "The concept test passed, but your original error is still present. Apply the concept to your code.";
                     console.log(`Zero-Magic Sidebar: Two-factor failed. Original error still present.`);
                 }
             }
@@ -470,7 +470,7 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                 this._hearts--;
                 this._hasFailedSubmit = true;
                 this._customFailedMessage = twoFactorFailedMessage || "The concept check test failed.";
-                
+
                 if (this._hearts <= 0) {
                     this._currentPage = 3;
                     this._currentState = 'FAILED';
@@ -483,7 +483,7 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
         } catch (err) {
             console.error('Zero-Magic Sidebar: Retrigger failed:', err);
             vscode.window.setStatusBarMessage('⚠️ Zero-Magic: Test re-run failed.', 5000);
-            
+
             this._hearts--;
             this._hasFailedSubmit = true;
             if (this._hearts <= 0) {
@@ -506,7 +506,7 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
         interceptor.invalidateAllExecutions();
         this._isTesting = false;
         await interceptor.cleanUpAllTests();
-        
+
         // Clean up socratic challenge file if it exists
         if (this._socraticChallengeUri) {
             try {
@@ -515,7 +515,7 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                 // Ignore if already deleted
             }
         }
-        
+
         this.reset();
     }
 
@@ -544,6 +544,7 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             revealedHints: this._revealedHints,
             customFailedMessage: this._customFailedMessage,
             expertSolution: this._expertSolution,
+            runtimeSummary: this._currentMission?.runtimeSummary ?? null,
         });
     }
 
@@ -927,6 +928,57 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             line-height: 1.5;
         }
 
+        /* Runtime Context Panel */
+        .runtime-panel {
+            border-top: 1px dashed rgba(166, 172, 205, 0.15);
+            padding-top: 14px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .runtime-panel.hidden {
+            display: none;
+        }
+
+        .runtime-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 0.72rem;
+            font-weight: 500;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+        }
+
+        .badge-fail {
+            color: #ff5f56;
+        }
+
+        .badge-ok {
+            color: #27c93f;
+        }
+
+        .runtime-error-text {
+            font-size: 0.78rem;
+            color: rgba(166, 172, 205, 0.75);
+            background: rgba(255, 95, 86, 0.06);
+            border: 1px dashed rgba(255, 95, 86, 0.2);
+            border-radius: 6px;
+            padding: 8px 10px;
+            line-height: 1.55;
+            white-space: pre-wrap;
+            word-break: break-all;
+            max-height: 90px;
+            overflow-y: auto;
+        }
+
+        .runtime-summary {
+            font-size: 0.75rem;
+            color: rgba(166, 172, 205, 0.5);
+            font-style: italic;
+        }
+
         /* Scrollbar */
         ::-webkit-scrollbar {
             width: 4px;
@@ -1000,6 +1052,19 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                     <span class="stats-key">Page</span>
                     <span class="stats-val" id="page-display">1 of 3</span>
                 </div>
+            </div>
+
+            <!-- RUNTIME CONTEXT PANEL -->
+            <div class="runtime-panel hidden" id="runtime-panel">
+                <div class="section-header">Runtime Context</div>
+                <div class="stats-row">
+                    <span class="stats-key">Exit Code</span>
+                    <span class="stats-val" id="runtime-exit-code">
+                        <span class="runtime-badge badge-fail" id="runtime-exit-badge">✗ 1</span>
+                    </span>
+                </div>
+                <div class="runtime-error-text" id="runtime-error-text"></div>
+                <div class="runtime-summary" id="runtime-summary">Runtime failure detected — mission questions target this specific error.</div>
             </div>
 
             <!-- NAVIGATION PANEL (Actions) -->
@@ -1104,7 +1169,49 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
         window.addEventListener('message', event => {
             const message = event.data;
             if (message.type === 'STATE_UPDATE') {
-                const { page, hearts, hintsUsed, totalHints, revealedHints, hasFailedSubmit, mission, expertSolution, attempts, timeElapsed } = message;
+                const { page, hearts, hintsUsed, totalHints, revealedHints, hasFailedSubmit, mission, expertSolution, attempts, timeElapsed, terminalOutput, exitCode } = message;
+
+                // ── Runtime Context Panel ────────────────────────────────────────
+                const runtimePanel = document.getElementById('runtime-panel');
+                const runtimeExitBadge = document.getElementById('runtime-exit-badge');
+
+                const hasRuntime = exitCode !== undefined && exitCode !== -1 && terminalOutput;
+                if (hasRuntime && runtimePanel) {
+                    runtimePanel.classList.remove('hidden');
+
+                    // Exit code badge
+                    if (runtimeExitBadge) {
+                        if (exitCode === 0) {
+                            runtimeExitBadge.textContent = '✓ 0';
+                            runtimeExitBadge.className = 'runtime-badge badge-ok';
+                        } else {
+                            runtimeExitBadge.textContent = '✗ ' + exitCode;
+                            runtimeExitBadge.className = 'runtime-badge badge-fail';
+                        }
+                    }
+
+                    // Last terminal error — show the last 300 chars (tail of traceback)
+                    const runtimeErrorText = document.getElementById('runtime-error-text');
+                    if (runtimeErrorText && terminalOutput) {
+                        const tail = terminalOutput.length > 300
+                            ? '…' + terminalOutput.slice(-300)
+                            : terminalOutput;
+                        runtimeErrorText.textContent = tail;
+                    }
+
+                    // Summary line
+                    const runtimeSummaryEl = document.getElementById('runtime-summary');
+                    if (runtimeSummaryEl) {
+                        if (exitCode === 0) {
+                            runtimeSummaryEl.textContent = 'Last run succeeded — mission targets the diagnostic error.';
+                        } else {
+                            runtimeSummaryEl.textContent = 'Runtime failure detected — questions target this specific error.';
+                        }
+                    }
+                } else if (runtimePanel) {
+                    runtimePanel.classList.add('hidden');
+                }
+
 
                 // Update Page Indicator display
                 const pageDisplay = document.getElementById('page-display');

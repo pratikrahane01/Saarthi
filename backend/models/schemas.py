@@ -22,6 +22,10 @@ class MissionRequest(BaseModel):
 
     The extension POSTs this to POST /v1/missions/match so the backend can
     look up (or generate) an appropriate Socratic mission.
+
+    Runtime-context fields (sourceCode, terminalOutput, exitCode,
+    diagnosticMessage) are all optional with safe defaults so that existing
+    callers that omit them continue to work without modification.
     """
 
     language: str = Field(
@@ -56,12 +60,58 @@ class MissionRequest(BaseModel):
         examples=["name 'x' is not defined", "cannot read property of undefined"],
     )
 
+    # ── Runtime-context fields (all optional, default to empty/sentinel) ────
+
+    diagnosticMessage: str = Field(
+        default="",
+        description=(
+            "Full diagnostic message from the IDE language server. "
+            "Takes priority over errorCode when non-empty. "
+            "Alias for 'message' that the new ContextBuilder sends explicitly."
+        ),
+        examples=["NameError: name 'result' is not defined on line 5"],
+    )
+
+    sourceCode: str = Field(
+        default="",
+        description=(
+            "Complete source code of the active file at the time the error "
+            "was captured. Used by the Groq prompt to generate highly specific "
+            "Socratic questions tied to the student's actual code."
+        ),
+    )
+
+    terminalOutput: str = Field(
+        default="",
+        description=(
+            "Combined stdout + stderr from the last terminal run. "
+            "Takes highest priority in context resolution "
+            "(terminalOutput > diagnosticMessage > errorCode). "
+            "Empty string when no terminal execution has occurred."
+        ),
+        examples=["Traceback (most recent call last):\n  File 'app.py', line 5\nNameError: name 'result' is not defined"],
+    )
+
+    exitCode: int = Field(
+        default=-1,
+        description=(
+            "Exit code of the last terminal process. "
+            "-1 means no process has been run this session. "
+            "0 means success; any other value indicates failure."
+        ),
+        examples=[-1, 0, 1],
+    )
+
     model_config = {
         "json_schema_extra": {
             "example": {
                 "language": "python",
                 "errorCode": "NameError",
                 "message": "name 'result' is not defined",
+                "diagnosticMessage": "NameError: name 'result' is not defined",
+                "sourceCode": "def compute():\n    x = 42\nprint(result)",
+                "terminalOutput": "Traceback (most recent call last):\n  File 'app.py', line 5\nNameError: name 'result' is not defined",
+                "exitCode": 1,
             }
         }
     }

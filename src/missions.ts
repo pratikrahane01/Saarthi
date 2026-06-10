@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { DiagnosticEvent } from './watcher';
+import { ContextBuilder, BuiltContext, RuntimeSummary } from './contextBuilder';
 import * as interceptor from './interceptor';
 
 // ── Output channel for structured, persistent logging ────────────────────────
@@ -9,11 +10,26 @@ const LOG = vscode.window.createOutputChannel('Zero-Magic');
 
 // ── API contract ─────────────────────────────────────────────────────────────
 
-/** Request body sent to POST /v1/missions/generate-mission */
+/**
+ * Extended request body sent to POST /v1/missions/generate-mission.
+ * Includes runtime terminal context on top of diagnostic fields.
+ * Backend priority: terminalOutput > diagnosticMessage > errorCode
+ */
 interface MissionRequest {
+    /** Programming language of the error file (e.g. 'python', 'typescript'). */
     language: string;
+    /** Short error-type identifier extracted from the message (e.g. 'NameError'). */
     errorCode: string;
+    /** Full human-readable error message from the IDE diagnostic. */
     message: string;
+    /** Explicit diagnostic text — alias for message for new context-aware flows. */
+    diagnosticMessage: string;
+    /** Complete source code of the active file at time of error. */
+    sourceCode: string;
+    /** Combined stdout + stderr from the last terminal run (empty string if none). */
+    terminalOutput: string;
+    /** Exit code of the last terminal process (-1 = no process run this session). */
+    exitCode: number;
 }
 
 /**
@@ -46,6 +62,8 @@ export interface Mission {
     targetUri: string;
     originalErrorCode: string;
     originalMessage: string;
+    /** Runtime context summary — populated when terminal output was available. */
+    runtimeSummary?: RuntimeSummary;
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -59,11 +77,11 @@ const FETCH_TIMEOUT_MS = 8_000;
  * This is intentionally generic — it is only shown when the server is down,
  * never as a replacement for real content.
  */
-function buildFallbackMission(event: DiagnosticEvent, errorCode: string): Mission {
+function buildFallbackMission(ctx: BuiltContext, errorCode: string): Mission {
     return {
         id: 'fallback_offline',
         title: 'Debug Mode (Backend Offline)',
-        language: event.languageId,
+        language: ctx.language,
         description: 'The Zero-Magic backend is currently unreachable. This is a generic offline mission. Start the backend server with: uvicorn backend.main:app --reload --port 8000',
         socraticQuestion: 'Before you can fix an error, what information do you need to gather about it?',
         hints: [
@@ -72,10 +90,11 @@ function buildFallbackMission(event: DiagnosticEvent, errorCode: string): Missio
             'Start the Zero-Magic backend server so you can get a tailored mission.',
         ],
         testPayload: 'def test_backend_connection():\n    import urllib.request\n    try:\n        urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=2)\n        assert True\n    except Exception:\n        assert False, "Backend server is not running on port 8000"',
-        targetFilename: event.filePath,
-        targetUri: vscode.Uri.file(event.filePath).toString(),
+        targetFilename: ctx.activeFilePath,
+        targetUri: vscode.Uri.file(ctx.activeFilePath).toString(),
         originalErrorCode: errorCode,
-        originalMessage: event.errorMessage,
+        originalMessage: ctx.diagnosticMessage,
+        runtimeSummary: ContextBuilder.instance.getRuntimeSummary(),
     };
 }
 
@@ -92,19 +111,20 @@ function buildFallbackMission(event: DiagnosticEvent, errorCode: string): Missio
  *   hints      → hints
  *   hiddenTest → testPayload
  */
-function mapResponseToMission(response: MissionResponse, event: DiagnosticEvent, errorCode: string): Mission {
+function mapResponseToMission(response: MissionResponse, ctx: BuiltContext, errorCode: string): Mission {
     return {
         id: response.missionId,
         title: response.title,
-        language: event.languageId,
+        language: ctx.language,
         description: response.concept,
         socraticQuestion: response.questions[0] ?? 'What do you think is causing this error?',
         hints: response.hints,
         testPayload: response.hiddenTest,
-        targetFilename: event.filePath,
-        targetUri: vscode.Uri.file(event.filePath).toString(),
+        targetFilename: ctx.activeFilePath,
+        targetUri: vscode.Uri.file(ctx.activeFilePath).toString(),
         originalErrorCode: errorCode,
-        originalMessage: event.errorMessage,
+        originalMessage: ctx.diagnosticMessage,
+        runtimeSummary: ContextBuilder.instance.getRuntimeSummary(),
     };
 }
 
@@ -144,7 +164,8 @@ function validateMissionResponse(raw: unknown): MissionResponse {
  * mission matching the user's current code error context.
  *
  * Flow:
- *  1. Build a MissionRequest from the DiagnosticEvent.
+ *  1. Use ContextBuilder to gather full context (language, errorCode, sourceCode,
+ *     terminalOutput, exitCode) from the DiagnosticEvent.
  *  2. POST to /v1/missions/generate-mission with an 8-second timeout.
  *  3. Map the MissionResponse fields to the Mission interface.
  *  4. Return null if the backend returns 404 (no mission for this error).
@@ -155,23 +176,30 @@ function validateMissionResponse(raw: unknown): MissionResponse {
  */
 export async function matchErrorToMission(event: DiagnosticEvent): Promise<Mission | null> {
 
-    // ── Build request body ────────────────────────────────────────────────────
-    // errorCode: extract the first word of the message as a best-effort code
-    // (e.g. "NameError: name 'x' is not defined" → "NameError").
-    // The backend's mission_service.py uses this for lookup.
-    const errorCodeMatch = event.errorMessage.match(/^([A-Za-z][A-Za-z0-9_]*)/);
-    const errorCode = errorCodeMatch ? errorCodeMatch[1] : 'UnknownError';
+    // ── Build full context via ContextBuilder ─────────────────────────────────
+    // ContextBuilder gathers: errorCode from message, source code from disk,
+    // terminalOutput from the rolling buffer, exitCode from shell integration.
+    const ctx = await ContextBuilder.instance.build(event);
 
     const requestBody: MissionRequest = {
-        language: event.languageId,
-        errorCode,
-        message: event.errorMessage,
+        language:          ctx.language,
+        errorCode:         ctx.errorCode,
+        message:           ctx.diagnosticMessage,
+        diagnosticMessage: ctx.diagnosticMessage,
+        sourceCode:        ctx.sourceCode,
+        terminalOutput:    ctx.terminalOutput,
+        exitCode:          ctx.exitCode,
     };
 
     LOG.appendLine(`[matchErrorToMission] POST ${BACKEND_URL}`);
-    LOG.appendLine(`  → language  : ${requestBody.language}`);
-    LOG.appendLine(`  → errorCode : ${requestBody.errorCode}`);
-    LOG.appendLine(`  → message   : ${requestBody.message.substring(0, 80)}${requestBody.message.length > 80 ? '…' : ''}`);
+    LOG.appendLine(`  → language       : ${requestBody.language}`);
+    LOG.appendLine(`  → errorCode      : ${requestBody.errorCode}`);
+    LOG.appendLine(`  → message        : ${requestBody.message.substring(0, 80)}${requestBody.message.length > 80 ? '…' : ''}`);
+    LOG.appendLine(`  → sourceCodeLen  : ${requestBody.sourceCode.length} chars`);
+    LOG.appendLine(`  → terminalOutput : ${requestBody.terminalOutput.length} chars (exitCode=${requestBody.exitCode})`);
+    if (requestBody.terminalOutput) {
+        LOG.appendLine(`  → [RUNTIME] Terminal output present — backend will prioritize over diagnostics`);
+    }
 
     // ── Fetch with timeout ────────────────────────────────────────────────────
     let response: Response;
@@ -193,7 +221,7 @@ export async function matchErrorToMission(event: DiagnosticEvent): Promise<Missi
         LOG.appendLine(`[matchErrorToMission] ⚠ Network error — backend unreachable: ${msg}`);
         LOG.appendLine('[matchErrorToMission] Falling back to offline mission.');
         vscode.window.setStatusBarMessage('⚠️ Zero-Magic: Backend server unreachable — using offline mission.', 6000);
-        return buildFallbackMission(event, errorCode);
+        return buildFallbackMission(ctx, ctx.errorCode);
     }
 
     // ── Handle HTTP error responses ───────────────────────────────────────────
@@ -230,8 +258,11 @@ export async function matchErrorToMission(event: DiagnosticEvent): Promise<Missi
     }
 
     // ── Map and return ────────────────────────────────────────────────────────
-    const mission = mapResponseToMission(validated, event, errorCode);
+    const mission = mapResponseToMission(validated, ctx, ctx.errorCode);
     LOG.appendLine(`[matchErrorToMission] ✓ Mission matched: id="${mission.id}" title="${mission.title}"`);
+    if (mission.runtimeSummary?.hasRuntimeData) {
+        LOG.appendLine(`[matchErrorToMission] ✓ Runtime context included: exitCode=${mission.runtimeSummary.exitCode}`);
+    }
     return mission;
 }
 

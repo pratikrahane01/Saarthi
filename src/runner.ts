@@ -16,7 +16,7 @@ export interface TestResult {
  *
  * @throws {Error} If no suitable executable is found on the system.
  */
-function detectExecutable(language: 'python' | 'node'): string {
+export function detectExecutable(language: 'python' | 'node'): string {
   if (language === 'node') {
     return 'node';
   }
