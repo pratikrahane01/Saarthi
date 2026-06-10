@@ -34,6 +34,8 @@ from backend.services import (
     generate_hidden_test,
     enrich_mission,
     groq_service,
+    resolve_primary_context,
+    build_groq_context_block,
 )
 from backend.services.mission_service import LookupStatus, MissionLookupError
 from backend.services.hidden_test_service import HiddenTestGenerationError
@@ -84,11 +86,30 @@ async def generate_mission(request_body: MissionRequest, request: Request) -> Mi
     request_id = _request_id(request)
 
     logger.info(
-        "[%s] POST /generate-mission | language=%r  errorCode=%r  message=%r",
+        "[%s] POST /generate-mission | language=%r  errorCode=%r  message=%r  "
+        "hasTerminal=%s  exitCode=%s",
         request_id,
         request_body.language,
         request_body.errorCode,
         request_body.message[:60] + "…" if len(request_body.message) > 60 else request_body.message,
+        bool(request_body.terminalOutput),
+        request_body.exitCode,
+    )
+
+    # ── Context resolution (priority: terminalOutput > diagnosticMessage > errorCode) ──
+    resolved = resolve_primary_context(
+        error_code=request_body.errorCode,
+        message=request_body.message,
+        diagnostic_message=request_body.diagnosticMessage,
+        terminal_output=request_body.terminalOutput,
+        source_code=request_body.sourceCode,
+    )
+    logger.info(
+        "[%s] Context resolved | source=%s  has_terminal=%s  has_code=%s",
+        request_id,
+        resolved.source.value,
+        resolved.has_terminal,
+        resolved.has_source_code,
     )
 
     # ── Step 1: Mission lookup ───────────────────────────────────────────────
@@ -185,7 +206,10 @@ async def generate_mission(request_body: MissionRequest, request: Request) -> Mi
     dynamic_mission = groq_service.generate_dynamic_mission(
         language=request_body.language,
         error_code=request_body.errorCode,
-        message=request_body.message,
+        message=resolved.primary_text,
+        source_code=request_body.sourceCode,
+        terminal_output=request_body.terminalOutput,
+        exit_code=request_body.exitCode,
     )
 
     # Create a stable, safe missionId for the extension's file management

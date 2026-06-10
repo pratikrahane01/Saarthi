@@ -1,6 +1,6 @@
 # services package — business logic layer for Zero-Magic backend.
 # Import from here to perform mission lookups, hidden-test generation,
-# and optional LLM enrichment without coupling to FastAPI.
+# optional LLM enrichment, and context resolution without coupling to FastAPI.
 
 from .mission_service import MissionLookupResult, lookup_mission
 from .hidden_test_service import (
@@ -10,6 +10,9 @@ from .hidden_test_service import (
     list_registered_generators,
 )
 from .llm_service import LLMEnrichment, enrich_mission
+from . import groq_service
+from . import context_service
+from .context_service import ResolvedContext, ContextSource, resolve_primary_context, build_groq_context_block
 
 __all__ = [
     # mission lookup
@@ -23,4 +26,12 @@ __all__ = [
     # optional LLM enrichment
     "LLMEnrichment",
     "enrich_mission",
+    # groq direct access
+    "groq_service",
+    # context resolution (terminal-aware)
+    "context_service",
+    "ResolvedContext",
+    "ContextSource",
+    "resolve_primary_context",
+    "build_groq_context_block",
 ]

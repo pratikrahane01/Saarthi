@@ -3,12 +3,17 @@ import { activateWatcher } from './watcher';
 import { SocraticSidebarProvider } from './ui/sidebar';
 import { Mission } from './missions';
 import { cleanUpAllTests } from './interceptor';
+import { ContextBuilder } from './contextBuilder';
 
 export async function activate(context: vscode.ExtensionContext) {
     console.log('Zero-Magic Deconstruction Agent is now active.');
 
     // Phase 9: Clean up any orphaned test files from previous sessions
     await cleanUpAllTests();
+
+    // Terminal-aware context: start buffering terminal output + exit codes
+    // so every subsequent Quick Fix trigger has runtime context available.
+    ContextBuilder.instance.activate();
 
     // Phase 1: Activate the error watcher & Quick Fix provider
     activateWatcher(context);
@@ -40,4 +45,5 @@ export async function activate(context: vscode.ExtensionContext) {
 
 export async function deactivate() {
     await cleanUpAllTests();
+    ContextBuilder.instance.dispose();
 }
