@@ -63,6 +63,7 @@ class TierClassification:
     pro_tip: str = ""
     explanation: str = ""
     source: Literal["regex", "llm", "fallback"] = "fallback"
+    api_used: str = "none"
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +154,7 @@ def _try_regex_classify(
                 pro_tip=tip,
                 explanation="",
                 source="regex",
+                api_used="none",
             )
 
     # ── Tier 3 fast-path (terminal traceback or explicit runtime signals) ─
@@ -166,6 +168,7 @@ def _try_regex_classify(
                 pro_tip="",
                 explanation="Runtime crash detected — isolating root cause for Deep Dive.",
                 source="regex",
+                api_used="none",
             )
 
     # Long multi-line terminal traceback → Tier 3
@@ -177,6 +180,7 @@ def _try_regex_classify(
             pro_tip="",
             explanation=f"Multi-line runtime traceback detected ({terminal_newlines} lines). Isolating root cause.",
             source="regex",
+            api_used="none",
         )
 
     return None  # Let the LLM decide
@@ -315,6 +319,7 @@ def _call_groq_classifier(
             pro_tip=pro_tip,
             explanation=explanation,
             source="llm",
+            api_used="groq",
         )
 
     except (json.JSONDecodeError, ValueError, KeyError) as exc:
@@ -388,4 +393,5 @@ def classify_error_tier(
         pro_tip="",
         explanation="Could not classify error precisely — defaulting to guided analysis.",
         source="fallback",
+        api_used="none",
     )

@@ -400,6 +400,7 @@ async def classify_tier(
         proTip=result.pro_tip,
         explanation=result.explanation,
         source=result.source,
+        apiUsed=result.api_used,
     )
 
 

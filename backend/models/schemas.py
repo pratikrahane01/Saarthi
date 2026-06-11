@@ -382,6 +382,11 @@ class TierClassifyResponse(BaseModel):
         description="How the tier was determined: 'regex', 'llm', or 'fallback'.",
         examples=["llm", "regex", "fallback"],
     )
+    apiUsed: str = Field(
+        default="none",
+        description="Which API was used for classification (e.g., 'groq', 'none').",
+        examples=["groq", "none"],
+    )
 
     model_config = {
         "json_schema_extra": {
@@ -391,6 +396,7 @@ class TierClassifyResponse(BaseModel):
                 "proTip": "",
                 "explanation": "TypeError at runtime — data flow issue, not a syntax problem.",
                 "source": "llm",
+                "apiUsed": "groq",
             }
         }
     }
