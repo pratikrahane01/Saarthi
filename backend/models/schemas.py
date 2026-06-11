@@ -22,6 +22,10 @@ class MissionRequest(BaseModel):
 
     The extension POSTs this to POST /v1/missions/match so the backend can
     look up (or generate) an appropriate Socratic mission.
+
+    Runtime-context fields (sourceCode, terminalOutput, exitCode,
+    diagnosticMessage) are all optional with safe defaults so that existing
+    callers that omit them continue to work without modification.
     """
 
     language: str = Field(
@@ -56,12 +60,58 @@ class MissionRequest(BaseModel):
         examples=["name 'x' is not defined", "cannot read property of undefined"],
     )
 
+    # ── Runtime-context fields (all optional, default to empty/sentinel) ────
+
+    diagnosticMessage: str = Field(
+        default="",
+        description=(
+            "Full diagnostic message from the IDE language server. "
+            "Takes priority over errorCode when non-empty. "
+            "Alias for 'message' that the new ContextBuilder sends explicitly."
+        ),
+        examples=["NameError: name 'result' is not defined on line 5"],
+    )
+
+    sourceCode: str = Field(
+        default="",
+        description=(
+            "Complete source code of the active file at the time the error "
+            "was captured. Used by the Groq prompt to generate highly specific "
+            "Socratic questions tied to the student's actual code."
+        ),
+    )
+
+    terminalOutput: str = Field(
+        default="",
+        description=(
+            "Combined stdout + stderr from the last terminal run. "
+            "Takes highest priority in context resolution "
+            "(terminalOutput > diagnosticMessage > errorCode). "
+            "Empty string when no terminal execution has occurred."
+        ),
+        examples=["Traceback (most recent call last):\n  File 'app.py', line 5\nNameError: name 'result' is not defined"],
+    )
+
+    exitCode: int = Field(
+        default=-1,
+        description=(
+            "Exit code of the last terminal process. "
+            "-1 means no process has been run this session. "
+            "0 means success; any other value indicates failure."
+        ),
+        examples=[-1, 0, 1],
+    )
+
     model_config = {
         "json_schema_extra": {
             "example": {
                 "language": "python",
                 "errorCode": "NameError",
                 "message": "name 'result' is not defined",
+                "diagnosticMessage": "NameError: name 'result' is not defined",
+                "sourceCode": "def compute():\n    x = 42\nprint(result)",
+                "terminalOutput": "Traceback (most recent call last):\n  File 'app.py', line 5\nNameError: name 'result' is not defined",
+                "exitCode": 1,
             }
         }
     }
@@ -223,3 +273,124 @@ class SolutionResponse(BaseModel):
     fixedCode: str = Field(...)
     explanation: str = Field(...)
     conceptSummary: str = Field(...)
+
+# ---------------------------------------------------------------------------
+# File Analysis Request Model
+# ---------------------------------------------------------------------------
+
+class FileAnalysisRequest(BaseModel):
+    language: str = Field(
+        ...,
+        description="The programming language of the full file context.",
+        examples=["python", "javascript", "typescript"],
+    )
+    fullCode: str = Field(
+        ...,
+        description="The complete source code of the file.",
+        examples=["def main():\n    print('hello world')"],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tier Classification Models
+# ---------------------------------------------------------------------------
+
+class TierClassifyRequest(BaseModel):
+    """
+    Payload for POST /v1/missions/classify-tier.
+
+    Sent by the VS Code extension immediately after a diagnostic event is
+    captured. The backend uses GROQ_API_KEY1 (dedicated classifier key) plus
+    a regex fast-path to determine which tier of error assistance to display.
+    """
+
+    language: str = Field(
+        ...,
+        description="Programming language of the file that raised the error.",
+        examples=["python", "javascript"],
+    )
+    errorCode: str = Field(
+        ...,
+        description="Short error-type identifier (e.g. 'TypeError', 'SyntaxError').",
+        examples=["TypeError", "SyntaxError", "NameError"],
+    )
+    message: str = Field(
+        ...,
+        description="Full human-readable error message from the IDE diagnostic.",
+        examples=["name 'x' is not defined"],
+    )
+    terminalOutput: str = Field(
+        default="",
+        description="Combined stdout + stderr from the last terminal run.",
+    )
+    sourceCode: str = Field(
+        default="",
+        description="Complete source of the active file (improves LLM accuracy).",
+    )
+    lineNumber: int = Field(
+        default=0,
+        description="Line number where the error occurred (0 = unknown).",
+        examples=[14, 42, 0],
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "language": "python",
+                "errorCode": "TypeError",
+                "message": "'NoneType' object is not subscriptable",
+                "terminalOutput": "Traceback (most recent call last):\n  File 'app.py', line 14\nTypeError: 'NoneType' object is not subscriptable",
+                "sourceCode": "data = fetch_data()\nprint(data[0])",
+                "lineNumber": 14,
+            }
+        }
+    }
+
+
+class TierClassifyResponse(BaseModel):
+    """
+    Result of tier classification returned to the VS Code extension.
+
+    The extension uses `tier` to decide which sidebar card to render:
+      1 → lightweight TIER1_NUDGE card (no API, instant)
+      2 → TIER2_ANALYSIS card + opt-in [Deep Dive] button
+      3 → auto-trigger DEEP_DIVE mode
+    """
+
+    tier: int = Field(
+        ...,
+        description="Error tier: 1 = Syntax Nudge, 2 = Analysis Card, 3 = Deep Dive.",
+        examples=[1, 2, 3],
+    )
+    errorFlag: str = Field(
+        ...,
+        description="Human-readable one-liner: 'Line N: ErrorCode: message'.",
+        examples=["Line 14: TypeError: 'NoneType' object is not subscriptable"],
+    )
+    proTip: str = Field(
+        default="",
+        description="Curated tip for Tier 1 errors. Empty string for Tier 2/3.",
+        examples=["Tip: Read the caret in the traceback — it points to the rejected character."],
+    )
+    explanation: str = Field(
+        default="",
+        description="One-sentence rationale for the tier assignment (Tier 2/3). Empty for Tier 1.",
+        examples=["TypeError at runtime indicates a semantic type mismatch, not a syntax issue."],
+    )
+    source: str = Field(
+        default="fallback",
+        description="How the tier was determined: 'regex', 'llm', or 'fallback'.",
+        examples=["llm", "regex", "fallback"],
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "tier": 2,
+                "errorFlag": "Line 14: TypeError: 'NoneType' object is not subscriptable",
+                "proTip": "",
+                "explanation": "TypeError at runtime — data flow issue, not a syntax problem.",
+                "source": "llm",
+            }
+        }
+    }

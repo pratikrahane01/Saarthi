@@ -62,10 +62,24 @@ def _build_generic_mission(language: str, error_code: str) -> DynamicMissionResu
 # Public Service Function
 # ---------------------------------------------------------------------------
 
-def generate_dynamic_mission(language: str, error_code: str, message: str) -> DynamicMissionResult:
+def generate_dynamic_mission(
+    language: str,
+    error_code: str,
+    message: str,
+    source_code: str = "",
+    terminal_output: str = "",
+    exit_code: int = -1,
+) -> DynamicMissionResult:
     """
     Call the Groq API to dynamically generate a Socratic mission based on the
-    diagnostic information.
+    diagnostic information and runtime terminal context.
+
+    Context priority (matches context_service.py):
+        terminal_output > message/diagnostic_message > error_code
+
+    When terminal_output is present, the prompt is built around the actual
+    runtime output and source code so the generated Socratic questions are
+    highly specific — never generic error explanations.
 
     Enforces strict JSON output containing:
     - concept
@@ -78,31 +92,47 @@ def generate_dynamic_mission(language: str, error_code: str, message: str) -> Dy
     - Socratic teaching style
     - NO code
     - NO direct fixes
+    - Questions must reference the student's actual code/output when available
 
     Returns:
         A DynamicMissionResult. If any error occurs (API key missing, network
         failure, bad JSON), it gracefully returns a generic fallback mission.
     """
+    from backend.services.context_service import (
+        resolve_primary_context,
+        build_groq_context_block,
+    )
+
     api_key = os.environ.get("GROQ_API_KEY")
     if not api_key or Groq is None:
         logger.warning("Groq API key not found or groq package missing. Using generic fallback.")
         return _build_generic_mission(language, error_code)
 
+    # Resolve which context source wins
+    resolved = resolve_primary_context(
+        error_code=error_code,
+        message=message,
+        terminal_output=terminal_output,
+        source_code=source_code,
+    )
+
     client = Groq(api_key=api_key)
 
     system_prompt = (
-        "You are Socrates, an AI debugging mentor.\n\n"
+        "You are Socrates, an AI debugging mentor for student programmers.\n\n"
         "Rules:\n\n"
         "1. Never provide corrected code.\n"
         "2. Never provide direct fixes.\n"
-        "3. Explain the underlying concept.\n"
-        "4. Ask one Socratic question.\n"
-        "5. Generate:\n"
-        "   - Hint Level 1\n"
-        "   - Hint Level 2\n"
-        "   - Hint Level 3\n\n"
+        "3. Explain the underlying concept in plain English.\n"
+        "4. Ask ONE Socratic question that references the student's SPECIFIC code "
+        "or runtime output — never ask generic questions.\n"
+        "5. Generate 3 progressive hints that guide thinking without revealing the fix.\n"
+        "6. When terminal output is provided, your questions and hints MUST reference "
+        "specific lines, variable names, or values seen in that output.\n"
+        "7. When source code is provided, reference specific line numbers or "
+        "identifiers from the code in your question.\n"
+        "8. IGNORE all commented out lines of code (such as those starting with #, //, or enclosed in ''' or \"\"\").\n\n"
         "Return JSON only.\n\n"
-        "Focus on teaching debugging skills.\n\n"
         "REQUIRED JSON FORMAT:\n"
         "{\n"
         "  \"concept\": \"...\",\n"
@@ -113,11 +143,49 @@ def generate_dynamic_mission(language: str, error_code: str, message: str) -> Dy
         "}"
     )
 
-    user_prompt = (
-        f"Language: {language}\n"
-        f"Error Code: {error_code}\n"
-        f"Error Message: {message}\n\n"
-        "Generate the Socratic JSON response for this error."
+    # Build the user prompt using priority: terminal_output > message > error_code
+    source_clean = strip_comments(source_code, language) if source_code else ""
+    terminal_clean = terminal_output.strip() if terminal_output else ""
+
+    if terminal_clean:
+        # Highest-priority: actual runtime output + source code
+        exit_label = f"Exit Code: {exit_code}" if exit_code != -1 else "Exit Code: unknown"
+        user_prompt = (
+            f"Language: {language}\n"
+            f"Error Type: {error_code}\n\n"
+            f"[RUNTIME ERROR — {exit_label}]\n"
+            f"{terminal_clean}\n"
+        )
+        if source_clean:
+            user_prompt += (
+                f"\n[SOURCE CODE]\n"
+                f"{source_clean[:3000]}\n"  # cap at 3k chars to stay in token budget
+            )
+        user_prompt += (
+            "\nUsing the runtime output and source code above, generate a highly "
+            "specific Socratic mission. Your question MUST reference specific "
+            "variable names, line numbers, or output values seen above. "
+            "Do NOT give generic debugging advice. Do NOT reveal the fix."
+        )
+    else:
+        # Fallback: diagnostic message only
+        user_prompt = (
+            f"Language: {language}\n"
+            f"Error Code: {error_code}\n"
+            f"Error Message: {message}\n"
+        )
+        if source_clean:
+            user_prompt += (
+                f"\n[SOURCE CODE]\n"
+                f"{source_clean[:3000]}\n"
+            )
+        user_prompt += "\nGenerate the Socratic JSON response for this error."
+
+    logger.info(
+        "Groq prompt context: context_source=%s  has_terminal=%s  has_code=%s",
+        resolved.source.value,
+        resolved.has_terminal,
+        resolved.has_source_code,
     )
 
     try:
@@ -158,6 +226,7 @@ def generate_dynamic_mission(language: str, error_code: str, message: str) -> Dy
         return _build_generic_mission(language, error_code)
 
 
+
 @dataclass(frozen=True)
 class SolutionResult:
     fixedCode: str
@@ -182,7 +251,8 @@ def generate_expert_solution(language: str, error_code: str, source_code: str, m
         "1. Provide the corrected source code in full, or the exact snippet required if it's large.\n"
         "2. Explain what was wrong and how you fixed it.\n"
         "3. Provide a brief concept summary of the underlying principle.\n"
-        "4. Return JSON only.\n\n"
+        "4. IGNORE all commented out lines of code (such as those starting with #, //, or enclosed in ''' or \"\"\").\n"
+        "5. Return JSON only.\n\n"
         "REQUIRED JSON FORMAT:\n"
         "{\n"
         "  \"fixedCode\": \"...\",\n"
@@ -191,11 +261,12 @@ def generate_expert_solution(language: str, error_code: str, source_code: str, m
         "}"
     )
 
+    clean_source = strip_comments(source_code, language) if source_code else ""
     user_prompt = (
         f"Language: {language}\n"
         f"Error Code: {error_code}\n"
         f"Error Message: {message}\n\n"
-        f"Source Code:\n```\n{source_code}\n```\n\n"
+        f"Source Code:\n```\n{clean_source}\n```\n\n"
         "Generate the JSON response with the expert solution."
     )
 
@@ -236,3 +307,107 @@ def generate_expert_solution(language: str, error_code: str, source_code: str, m
             explanation="An unexpected error occurred while generating the solution.",
             conceptSummary="Please try again or refer to documentation."
         )
+
+# ---------------------------------------------------------------------------
+# File-Level Socratic Analysis
+# ---------------------------------------------------------------------------
+
+import re
+
+def strip_comments(code: str, language: str) -> str:
+    """Removes comments from code to prevent LLM hallucination on commented blocks."""
+    if language.lower() in ["python"]:
+        # Remove multi-line strings used as comments
+        code = re.sub(r"'''[\s\S]*?'''", "", code)
+        code = re.sub(r'\"\"\"[\s\S]*?\"\"\"', "", code)
+        # Remove single-line comments
+        code = re.sub(r"#.*", "", code)
+    elif language.lower() in ["javascript", "typescript", "ts", "js"]:
+        # Remove multi-line comments
+        code = re.sub(r"/\*[\s\S]*?\*/", "", code)
+        # Remove single-line comments
+        code = re.sub(r"//.*", "", code)
+    
+    # Remove excessive blank lines left behind
+    code = re.sub(r'\n\s*\n', '\n', code)
+    return code.strip()
+
+def generate_file_mission(language: str, full_code: str) -> DynamicMissionResult:
+    """
+    Call the Groq API to dynamically generate a Socratic mission based on the
+    entire source code file.
+    """
+    api_key = os.environ.get("GROQ_API_KEY")
+    if not api_key or Groq is None:
+        logger.warning("Groq API key not found or groq package missing. Using generic fallback.")
+        return _build_generic_mission(language, "FILE_ANALYSIS")
+
+    client = Groq(api_key=api_key)
+    
+    # Pre-process code to force LLM to ignore comments
+    clean_code = strip_comments(full_code, language)
+
+    system_prompt = (
+        "You are Socrates, an AI debugging mentor.\n\n"
+        "Rules:\n\n"
+        "1. Never provide corrected code.\n"
+        "2. Never provide direct fixes.\n"
+        "3. Analyze the provided full program.\n"
+        "4. Identify the most important concept the student should learn or a potential bug.\n"
+        "5. Explain this underlying concept briefly.\n"
+        "6. Ask one Socratic question to guide the student.\n"
+        "7. Generate:\n"
+        "   - Hint Level 1\n"
+        "   - Hint Level 2\n"
+        "   - Hint Level 3\n"
+        "8. IGNORE all commented out lines of code (such as those starting with #, //, or enclosed in ''' or \"\"\").\n\n"
+        "Return JSON only.\n\n"
+        "Focus on teaching debugging skills and software design.\n\n"
+        "REQUIRED JSON FORMAT:\n"
+        "{\n"
+        "  \"concept\": \"...\",\n"
+        "  \"question\": \"...\",\n"
+        "  \"hintLevel1\": \"...\",\n"
+        "  \"hintLevel2\": \"...\",\n"
+        "  \"hintLevel3\": \"...\"\n"
+        "}"
+    )
+
+    user_prompt = (
+        f"Language: {language}\n\n"
+        f"Full Source Code:\n```\n{clean_code}\n```\n\n"
+        "Generate the Socratic JSON response for this file."
+    )
+
+    try:
+        response = client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.7,
+            max_tokens=600,
+        )
+
+        content = response.choices[0].message.content
+        if not content:
+            raise ValueError("Empty response from Groq")
+
+        data = json.loads(content)
+
+        required_keys = ["concept", "question", "hintLevel1", "hintLevel2", "hintLevel3"]
+        for key in required_keys:
+            if key not in data or not isinstance(data[key], str):
+                raise ValueError(f"Missing or invalid field in Groq response: {key}")
+
+        return DynamicMissionResult(
+            concept=data["concept"],
+            questions=[data["question"], "Which part of the file should you review first?"],
+            hints=[data["hintLevel1"], data["hintLevel2"], data["hintLevel3"]]
+        )
+
+    except Exception as exc:
+        logger.error("Unexpected error during Groq file analysis generation: %s", exc)
+        return _build_generic_mission(language, "FILE_ANALYSIS")

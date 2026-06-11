@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { matchErrorToMission, executeMissionHandOff } from './missions';
+import { matchErrorToMission, executeMissionHandOff, matchWholeFileToMission } from './missions';
 
 // Define the strict contract we agreed upon for Teammate 2
 export interface DiagnosticEvent {
@@ -65,7 +65,51 @@ export function activateWatcher(context: vscode.ExtensionContext) {
         }
     );
 
-    context.subscriptions.push(diagnosticListener, codeActionProvider, commandHandler);
+    // 4. The Whole File Analysis Hook: What happens when the user presses Ctrl+Alt+Z
+    const analyzeWholeFileHandler = vscode.commands.registerCommand(
+        'zeroMagic.analyzeWholeFile',
+        async () => {
+            if (isMissionLoading) {
+                console.log('Zero-Magic: Ignored duplicate mission request.');
+                return;
+            }
+
+            const editor = vscode.window.activeTextEditor;
+            if (!editor) {
+                vscode.window.showInformationMessage("No active editor found to analyze.");
+                return;
+            }
+
+            isMissionLoading = true;
+            try {
+                await vscode.window.withProgress({
+                    location: vscode.ProgressLocation.Notification,
+                    title: "Zero-Magic Engine",
+                    cancellable: false
+                }, async (progress) => {
+                    progress.report({ message: "Analyzing full file context..." });
+                    
+                    const document = editor.document;
+                    const fullCode = document.getText();
+                    const languageId = document.languageId;
+                    const filePath = document.uri.fsPath;
+
+                    const matchedMission = await matchWholeFileToMission(fullCode, languageId, filePath);
+                    
+                    if (matchedMission) {
+                        progress.report({ message: "Socratic Mission Generated! Handing off..." });
+                        await executeMissionHandOff(matchedMission);
+                    } else {
+                        vscode.window.showInformationMessage("Failed to analyze file. Please check your backend connection.");
+                    }
+                });
+            } finally {
+                isMissionLoading = false;
+            }
+        }
+    );
+
+    context.subscriptions.push(diagnosticListener, codeActionProvider, commandHandler, analyzeWholeFileHandler);
 }
 
 // --- Internal Logic ---
