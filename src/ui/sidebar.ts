@@ -1,13 +1,15 @@
 import * as vscode from 'vscode';
-import { Mission, fetchExpertSolution, SolutionRequest } from '../missions';
+import { Mission, fetchExpertSolution, SolutionRequest, evaluateHypothesisAPI } from '../missions';
 import * as interceptor from '../interceptor';
 import * as path from 'path';
+import { getRitualState, advanceStep, skipRitual, DebugRitualState } from '../debugTrainer';
+import { globalContext } from '../extension';
 
 /**
- * The six possible UI states for the Socratic Dashboard.
+ * The seven possible UI states for the Socratic Dashboard.
  * Each state maps to a distinct visual presentation in the webview.
  */
-export type DashboardState = 'IDLE' | 'QUESTIONING' | 'HINTING' | 'TESTING' | 'PASSED' | 'FAILED' | 'SOLUTION';
+export type DashboardState = 'IDLE' | 'RITUAL' | 'QUESTIONING' | 'HINTING' | 'TESTING' | 'PASSED' | 'FAILED' | 'SOLUTION';
 
 export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
 
@@ -28,6 +30,8 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
         explanation: string;
         conceptSummary: string;
     };
+    private _canSkipRitual: boolean = false;
+    private _ritualState: DebugRitualState | null = null;
 
     // Game state variables matching user specifications
     private _currentPage: number = 1;
@@ -73,11 +77,24 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
     // ──────────────────────────────────────────────
 
     /**
-     * Load a new mission and transition to the QUESTIONING state.
+     * Load a new mission and transition to QUESTIONING or RITUAL state.
+     * For Tier 1 errors (syntax/typo) we skip the ritual entirely.
      */
-    public showMission(mission: Mission) {
+    public showMission(mission: Mission, canSkipRitual: boolean = false) {
         this._currentMission = mission;
-        this._currentState = 'QUESTIONING';
+        this._canSkipRitual = canSkipRitual;
+        this._ritualState = getRitualState(globalContext, mission.id);
+
+        // Tier 1 = Syntax/Typo: skip ritual, show mission card directly
+        const tier = mission.tier ?? 2;
+        const needsRitual = tier >= 2;
+
+        if (needsRitual && this._ritualState && this._ritualState.step < 3) {
+            this._currentState = 'RITUAL';
+        } else {
+            this._currentState = 'QUESTIONING';
+        }
+        
         this._currentPage = 1;
         this._hearts = 3;
         this._hintsUsed = 0;
@@ -146,6 +163,14 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                 this._onRequestHint();
                 break;
 
+            case 'SUBMIT_RITUAL_STEP':
+                this._onSubmitRitualStep(message.response, message.force);
+                break;
+
+            case 'SKIP_RITUAL':
+                this._onSkipRitual();
+                break;
+
             case 'SUBMIT_ANSWER':
                 if (this._isTesting) {
                     console.log('Zero-Magic Sidebar: Ignoring SUBMIT_ANSWER, test already running.');
@@ -181,6 +206,47 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             default:
                 console.log('Zero-Magic Sidebar: Unknown message type', message.type);
         }
+    }
+
+    private async _onSubmitRitualStep(response: string, force: boolean = false) {
+        if (!this._currentMission) return;
+        const currentState = this._ritualState;
+        
+        // If we are submitting hypothesis, evaluate it via LLM first
+        if (this._currentState === 'RITUAL' && currentState && currentState.step < 3 && !force) {
+            this.postMessage({ type: 'HYPOTHESIS_FEEDBACK', status: 'LOADING' });
+            
+            // Reconstruct code snippet (using targetUri)
+            let snippet = "";
+            if (currentState.errorLines && currentState.errorLines.length > 0) {
+                snippet = currentState.errorLines.map(l => `Line ${l.line}: ${l.text}`).join('\n');
+            }
+            
+            const evalResult = await evaluateHypothesisAPI(
+                response,
+                this._currentMission.originalMessage || this._currentMission.originalErrorCode,
+                snippet
+            );
+            
+            this.postMessage({ type: 'HYPOTHESIS_FEEDBACK', status: evalResult.status, nudge: evalResult.nudge });
+            
+            if (evalResult.status !== 'PASS') {
+                // Do not advance step if fail/close
+                return;
+            }
+        }
+        
+        const state = await advanceStep(globalContext, this._currentMission.id, response);
+        this._ritualState = state;
+        await this._onRequestSolution();
+    }
+    
+    private async _onSkipRitual() {
+        if (!this._currentMission) return;
+        const state = await skipRitual(globalContext, this._currentMission.id);
+        this._ritualState = state;
+        this._currentState = 'QUESTIONING';
+        this._postState();
     }
 
     /**
@@ -545,6 +611,8 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             customFailedMessage: this._customFailedMessage,
             expertSolution: this._expertSolution,
             runtimeSummary: this._currentMission?.runtimeSummary ?? null,
+            canSkipRitual: this._canSkipRitual,
+            ritualState: this._ritualState,
         });
     }
 
@@ -968,6 +1036,25 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             color: #a6accd;
         }
 
+        /* ── RITUAL PANEL CSS (Base/Retro) ── */
+        .ritual-step-indicator { flex: 1; height: 3px; border-radius: 2px; transition: opacity 0.3s, background-color 0.3s; }
+        .ritual-step-indicator.active { background-color: #f29879; }
+        .ritual-step-indicator.inactive { background-color: rgba(166,172,205,0.2); }
+        .ritual-title-text { color: #f29879 !important; }
+        .ritual-card { border-radius: 6px; padding: 12px; }
+        .ritual-card-info { background: rgba(242,152,121,0.08); border: 1px dashed rgba(242,152,121,0.3); }
+        .ritual-card-warning { background: rgba(100,120,200,0.08); border: 1px dashed rgba(100,120,200,0.25); }
+        .ritual-card-title { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 8px; color: rgba(242,152,121,0.8); }
+        .ritual-card-title-warning { color: rgba(140,160,220,0.8); }
+        .ritual-code-block { font-family: 'DM Mono', monospace; font-size: 0.8rem; line-height: 1.7; color: #c5cdd8; }
+        .ritual-subtitle { font-size: 0.85rem; line-height: 1.6; color: rgba(166,172,205,0.8); }
+        .ritual-highlight { color: #e6edf3; }
+        .ritual-textarea { width: 100%; background: rgba(0,0,0,0.2); border: 1px dashed rgba(166,172,205,0.2); border-radius: 6px; color: #e6edf3; padding: 10px; font-family: inherit; font-size: 0.85rem; resize: vertical; outline: none; transition: border-color 0.2s ease; }
+        .ritual-textarea:focus { border-color: rgba(242,152,121,0.5); }
+        .ritual-counter { font-size: 0.78rem; color: rgba(166,172,205,0.5); }
+        .ritual-skip-link { color: rgba(166,172,205,0.45); font-size: 0.75rem; text-decoration: underline; transition: color 0.2s ease; }
+        .ritual-skip-link:hover { color: rgba(166,172,205,0.8); }
+
         /* ── MODERN STARTUP THEME (Vercel/Linear Style) ── */
         body.theme-startup {
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
@@ -1137,6 +1224,23 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             background: rgba(113, 113, 122, 0.8);
         }
 
+        /* ── RITUAL PANEL CSS (Startup Override) ── */
+        body.theme-startup .ritual-step-indicator.active { background-color: #8b5cf6; }
+        body.theme-startup .ritual-step-indicator.inactive { background-color: #27272a; }
+        body.theme-startup .ritual-title-text { color: #8b5cf6 !important; }
+        body.theme-startup .ritual-card-info { background: rgba(139, 92, 246, 0.05); border: 1px solid #3f3f46; }
+        body.theme-startup .ritual-card-warning { background: rgba(14, 165, 233, 0.05); border: 1px solid #3f3f46; }
+        body.theme-startup .ritual-card-title { color: #a78bfa; font-weight: 600; font-family: 'Inter', sans-serif; }
+        body.theme-startup .ritual-card-title-warning { color: #38bdf8; }
+        body.theme-startup .ritual-code-block { font-family: 'Fira Code', monospace; color: #d4d4d8; }
+        body.theme-startup .ritual-subtitle { color: #a1a1aa; font-family: 'Inter', sans-serif; font-size: 0.9rem; }
+        body.theme-startup .ritual-highlight { color: #fafafa; }
+        body.theme-startup .ritual-textarea { background: #09090b; border: 1px solid #3f3f46; color: #fafafa; font-family: 'Inter', sans-serif; }
+        body.theme-startup .ritual-textarea:focus { border-color: #8b5cf6; box-shadow: 0 0 0 1px #8b5cf6; }
+        body.theme-startup .ritual-counter { color: #71717a; }
+        body.theme-startup .ritual-skip-link { color: #71717a; }
+        body.theme-startup .ritual-skip-link:hover { color: #a1a1aa; }
+
         /* ── THE "NATIVE VS CODE" CHAMELEON THEME ── */
         body.theme-native {
             font-family: var(--vscode-font-family), sans-serif;
@@ -1287,6 +1391,24 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             font-family: var(--vscode-font-family), sans-serif;
             font-weight: bold;
         }
+
+        /* ── RITUAL PANEL CSS (Native Override) ── */
+        body.theme-native .ritual-step-indicator.active { background-color: var(--vscode-button-background); }
+        body.theme-native .ritual-step-indicator.inactive { background-color: var(--vscode-editorHoverWidget-background); }
+        body.theme-native .ritual-title-text { color: var(--vscode-foreground) !important; font-family: var(--vscode-font-family); }
+        body.theme-native .ritual-card { border-radius: 4px; border-style: solid; border-width: 1px; }
+        body.theme-native .ritual-card-info { background: var(--vscode-textBlockQuote-background); border-color: var(--vscode-textBlockQuote-border); border-left: 4px solid var(--vscode-textBlockQuote-border); }
+        body.theme-native .ritual-card-warning { background: var(--vscode-textBlockQuote-background); border-color: var(--vscode-textBlockQuote-border); border-left: 4px solid var(--vscode-editorWarning-foreground); }
+        body.theme-native .ritual-card-title { color: var(--vscode-descriptionForeground); font-family: var(--vscode-font-family); text-transform: none; font-size: 0.85rem; font-weight: bold; }
+        body.theme-native .ritual-card-title-warning { color: var(--vscode-editorWarning-foreground); }
+        body.theme-native .ritual-code-block { font-family: var(--vscode-editor-font-family); color: var(--vscode-editor-foreground); background-color: var(--vscode-textCodeBlock-background); padding: 4px; border-radius: 4px; }
+        body.theme-native .ritual-subtitle { color: var(--vscode-descriptionForeground); font-family: var(--vscode-font-family); font-size: 0.9rem; }
+        body.theme-native .ritual-highlight { color: var(--vscode-foreground); font-weight: bold; }
+        body.theme-native .ritual-textarea { background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, transparent); color: var(--vscode-input-foreground); font-family: var(--vscode-font-family); border-radius: 2px; }
+        body.theme-native .ritual-textarea:focus { border-color: var(--vscode-focusBorder); outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+        body.theme-native .ritual-counter { color: var(--vscode-descriptionForeground); font-family: var(--vscode-font-family); }
+        body.theme-native .ritual-skip-link { color: var(--vscode-textLink-foreground); font-family: var(--vscode-font-family); }
+        body.theme-native .ritual-skip-link:hover { color: var(--vscode-textLink-activeForeground); }
     </style>
 </head>
 <body>
@@ -1316,15 +1438,52 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             <!-- MAIN PANEL -->
             <div class="main-panel" id="main-panel">
                 <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px dashed rgba(166, 172, 205, 0.15); padding-bottom: 8px; margin-bottom: 4px;">
-                    <div class="section-header" id="panel-title" style="margin-bottom: 0;">Welcome, developer.</div>
+                    <div class="section-header" id="panel-title" style="margin-bottom: 0;">EXPLANATION</div>
                     <div id="hearts-capsule" style="display: flex; gap: 4px;">
                         <span class="heart-icon">♥</span>
                         <span class="heart-icon">♥</span>
                         <span class="heart-icon">♥</span>
                     </div>
                 </div>
-                <div class="question-text" id="question-text">Before you can fix the error, what information do you need to gather?</div>
+                
+                <!-- Page 1 Paper Layout -->
+                <div id="page-1-layout" style="display: flex; flex-direction: column; gap: 16px; margin-top: 8px; display: none;">
+                    <!-- Error summary card -->
+                    <div class="ritual-card ritual-card-info">
+                        <div class="ritual-card-title">MEANING</div>
+                        <div class="question-text" id="explanation-error-summary">Loading error summary...</div>
+                    </div>
+
+                    <!-- Suspect lines card -->
+                    <div class="ritual-card ritual-card-warning">
+                        <div class="ritual-card-title ritual-card-title-warning">LOCATION</div>
+                        <input type="text" id="explanation-line-input" class="ritual-textarea" placeholder="Line #" style="width: 100px; padding: 6px; margin-top: 4px; box-sizing: border-box;">
+                        <div class="ritual-subtitle" style="margin-top: 8px;">Check the terminal and analyze the code to find the exact line.</div>
+                    </div>
+
+                    <!-- Hypothesis input -->
+                    <div>
+                        <div class="ritual-card-title" style="margin-bottom: 4px; color: var(--vscode-foreground);">HYPOTHESIS</div>
+                        <div class="ritual-subtitle" style="margin-bottom: 10px;">
+                            <b class="ritual-highlight" id="explanation-question-text">Before you can fix the error...</b><br>
+                            Write your best guess — even if you're not sure. No code, just words.
+                        </div>
+                        <textarea id="explanation-input" class="ritual-textarea" rows="4" placeholder="e.g. I think the variable is missing a value before being used..."></textarea>
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 8px;">
+                            <span id="explanation-counter" class="ritual-counter">0 / 20 min</span>
+                            <button class="btn btn-solid btn-blue" id="btn-explanation-submit" style="width: auto; padding: 0 18px; opacity: 0.5;" disabled>Submit &amp; Start &rarr;</button>
+                        </div>
+                    </div>
+                    
+                    <!-- Skip link -->
+                    <div id="ritual-skip-container" style="display: none; text-align: center; margin-top: 4px;">
+                        <a href="#" id="link-ritual-skip" class="ritual-skip-link">Skip ritual (Rank 3+)</a>
+                    </div>
+                </div>
+
+                <div class="question-text" id="question-text" style="display: none; margin-top: 8px;"></div>
             </div>
+
 
             <!-- RUNTIME CONTEXT PANEL -->
             <div class="runtime-panel hidden" id="runtime-panel">
@@ -1386,6 +1545,7 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
 
     <script nonce="${nonce}">
         const vscode = acquireVsCodeApi();
+        let canProceedAnyway = false;
 
         const loadingOverlay = document.getElementById('loading-overlay');
         const loadingText = document.getElementById('loading-text');
@@ -1403,11 +1563,21 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             }, durationMs);
         }
 
+        // Utility: prevent XSS when rendering line content
+        function escapeHtml(str) {
+            return String(str)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;');
+        }
+
         // Run introduction loader on start
         window.addEventListener('DOMContentLoaded', () => {
             runLoader(3000, "Initializing Socratic Mission...");
             vscode.postMessage({ type: 'REQUEST_STATE' });
         });
+
 
         const btnHint = document.getElementById('btn-hint');
         btnHint.addEventListener('click', () => {
@@ -1441,6 +1611,51 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             runLoader(1500, "Extracting more details...", () => {
                 vscode.postMessage({ type: 'MORE_EXPLANATION' });
             });
+        });
+
+        // Explanation / Ritual text input
+        const explanationInput = document.getElementById('explanation-input');
+        const explanationCounter = document.getElementById('explanation-counter');
+        const btnExplanationSubmit = document.getElementById('btn-explanation-submit');
+        const linkRitualSkip = document.getElementById('link-ritual-skip');
+
+        explanationInput.addEventListener('input', () => {
+            const len = explanationInput.value.length;
+            explanationCounter.textContent = len + ' / 20 min';
+            
+            if (canProceedAnyway) {
+                canProceedAnyway = false;
+                btnExplanationSubmit.textContent = 'Submit & Start \u2192';
+                const feedbackDiv = document.getElementById('ritual-feedback');
+                if (feedbackDiv) {
+                    feedbackDiv.style.display = 'none';
+                }
+            }
+            
+            btnExplanationSubmit.disabled = len < 20;
+            btnExplanationSubmit.style.opacity = len < 20 ? '0.5' : '1';
+        });
+
+        btnExplanationSubmit.addEventListener('click', () => {
+            const lineInput = document.getElementById('explanation-line-input');
+            const hypVal = explanationInput.value;
+            const lineVal = lineInput ? lineInput.value : '';
+            const combinedVal = "Line: " + lineVal + "\\nReason: " + hypVal;
+
+            if (canProceedAnyway) {
+                vscode.postMessage({ type: 'SUBMIT_RITUAL_STEP', response: combinedVal, force: true });
+                explanationInput.value = '';
+                if (lineInput) lineInput.value = '';
+                explanationInput.dispatchEvent(new Event('input'));
+                canProceedAnyway = false;
+            } else if (hypVal.length >= 20) {
+                vscode.postMessage({ type: 'SUBMIT_RITUAL_STEP', response: combinedVal });
+            }
+        });
+        
+        linkRitualSkip.addEventListener('click', (e) => {
+            e.preventDefault();
+            vscode.postMessage({ type: 'SKIP_RITUAL' });
         });
 
         let navDirection = 'next';
@@ -1494,8 +1709,92 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
 
         window.addEventListener('message', event => {
             const message = event.data;
+            
+            if (message.type === 'HYPOTHESIS_FEEDBACK') {
+                const btnExplanationSubmit = document.getElementById('btn-explanation-submit');
+                const explanationInput = document.getElementById('explanation-input');
+                let feedbackDiv = document.getElementById('ritual-feedback');
+                
+                if (!feedbackDiv) {
+                    feedbackDiv = document.createElement('div');
+                    feedbackDiv.id = 'ritual-feedback';
+                    feedbackDiv.className = 'ritual-feedback';
+                    feedbackDiv.style.marginTop = '8px';
+                    feedbackDiv.style.borderRadius = '4px';
+                    explanationInput.parentNode.insertBefore(feedbackDiv, explanationInput.nextSibling);
+                }
+
+                if (message.status === 'LOADING') {
+                    btnExplanationSubmit.textContent = 'Evaluating...';
+                    btnExplanationSubmit.disabled = true;
+                    explanationInput.disabled = true;
+                    feedbackDiv.style.display = 'none';
+                } else {
+                    explanationInput.disabled = false;
+                    feedbackDiv.style.display = 'block';
+                    feedbackDiv.className = 'ritual-feedback ' + message.status.toLowerCase();
+                    
+                    if (message.status === 'PASS') {
+                        btnExplanationSubmit.textContent = 'Submit & Start \u2192';
+                        btnExplanationSubmit.disabled = false;
+                        feedbackDiv.innerHTML = '<strong>PASS:</strong> Hypothesis accepted. Unlocking mission...';
+                        feedbackDiv.style.backgroundColor = 'var(--vscode-editorInfo-background, rgba(39, 201, 63, 0.1))';
+                        feedbackDiv.style.color = 'var(--vscode-testing-iconPassed, #27c93f)';
+                        feedbackDiv.style.borderLeft = '4px solid var(--vscode-testing-iconPassed, #27c93f)';
+                        feedbackDiv.style.padding = '8px';
+                        canProceedAnyway = false;
+                    } else {
+                        btnExplanationSubmit.textContent = 'Proceed anyway \u2192';
+                        btnExplanationSubmit.disabled = false;
+                        btnExplanationSubmit.style.opacity = '1';
+                        feedbackDiv.innerHTML = '<strong>' + message.status + ':</strong> ' + message.nudge;
+                        feedbackDiv.style.backgroundColor = 'var(--vscode-editorError-background, rgba(255, 95, 86, 0.1))';
+                        feedbackDiv.style.color = 'var(--vscode-errorForeground, #ff5f56)';
+                        feedbackDiv.style.borderLeft = '4px solid var(--vscode-errorForeground, #ff5f56)';
+                        feedbackDiv.style.padding = '8px';
+                        canProceedAnyway = true;
+                    }
+                }
+                return;
+            }
+
             if (message.type === 'STATE_UPDATE') {
-                const { page, hearts, hintsUsed, totalHints, revealedHints, hasFailedSubmit, mission, expertSolution, attempts, timeElapsed, terminalOutput, exitCode } = message;
+                const { state, page, hearts, hintsUsed, totalHints, revealedHints, hasFailedSubmit, mission, expertSolution, attempts, timeElapsed, terminalOutput, exitCode, ritualState, canSkipRitual } = message;
+
+                const mainPanel = document.getElementById('main-panel');
+                const actionsPanel = document.querySelector('.actions-panel');
+                const pageFooter = document.querySelector('.page-footer');
+                const page1Layout = document.getElementById('page-1-layout');
+                const questionText = document.getElementById('question-text');
+
+                mainPanel.style.display = 'flex';
+                actionsPanel.style.display = 'flex';
+                pageFooter.style.display = 'flex';
+
+                if (page === 1) {
+                    page1Layout.style.display = 'flex';
+                    questionText.style.display = 'none';
+
+                    const ritualSkipContainer = document.getElementById('ritual-skip-container');
+
+                    // If tier is 1, ritualState might be null, but we still show the layout
+                    const summaryEl = document.getElementById('explanation-error-summary');
+                    if (summaryEl) {
+                        summaryEl.textContent = (ritualState && ritualState.errorSummary) ? ritualState.errorSummary : (mission ? mission.description || mission.originalMessage : 'Examine the problem to proceed.');
+                    }
+
+                    // Lines card is now interactive input, so we don't populate error lines block.
+
+                    if (canSkipRitual) {
+                        ritualSkipContainer.style.display = 'block';
+                    } else {
+                        ritualSkipContainer.style.display = 'none';
+                    }
+                } else {
+                    page1Layout.style.display = 'none';
+                    questionText.style.display = 'block';
+                }
+
 
                 // ── Runtime Context Panel ────────────────────────────────────────
                 const runtimePanel = document.getElementById('runtime-panel');
@@ -1547,16 +1846,18 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
 
                 // Update Panel Title & Main Panel Content
                 const panelTitle = document.getElementById('panel-title');
-                const questionText = document.getElementById('question-text');
 
                 if (page === 1) {
-                    panelTitle.textContent = "Explanation";
-                    questionText.innerHTML = mission ? mission.socraticQuestion : "Before you can fix the error, what information do you need to gather?";
+                    panelTitle.textContent = "EXPLANATION";
+                    const explanationQuestionText = document.getElementById('explanation-question-text');
+                    if (explanationQuestionText) {
+                        explanationQuestionText.innerHTML = mission ? mission.socraticQuestion : "Before you can fix the error, what information do you need to gather?";
+                    }
                 } else if (page === 2) {
-                    panelTitle.textContent = "Explanation";
+                    panelTitle.textContent = "EXPLANATION";
                     questionText.innerHTML = expertSolution ? expertSolution.explanation.replace(/\\n/g, '<br>') : "Detailed Explanation of the error";
                 } else if (page === 3) {
-                    panelTitle.textContent = "Mission end";
+                    panelTitle.textContent = "MISSION END";
                     if (hearts > 0) {
                         questionText.innerHTML = "PASSED\\n\\nSummary of Debugging Process and Learning:\\n" + (expertSolution ? expertSolution.conceptSummary : "Good job fixing the error!");
                     } else {

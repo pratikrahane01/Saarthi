@@ -28,7 +28,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, status
 
-from backend.models import MissionRequest, MissionResponse, SolutionRequest, SolutionResponse, FileAnalysisRequest, TierClassifyRequest, TierClassifyResponse
+from backend.models import MissionRequest, MissionResponse, SolutionRequest, SolutionResponse, FileAnalysisRequest, TierClassifyRequest, TierClassifyResponse, RitualContextRequest, RitualContextResponse
 from backend.services import (
     lookup_mission,
     generate_hidden_test,
@@ -400,6 +400,81 @@ async def classify_tier(
         proTip=result.pro_tip,
         explanation=result.explanation,
         source=result.source,
+    )
+
+
+# ---------------------------------------------------------------------------
+# POST /v1/missions/ritual-context  — Groq plain-English summary + suspect lines
+# ---------------------------------------------------------------------------
+
+@router.post(
+    "/ritual-context",
+    response_model=RitualContextResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Generate plain-English error summary and suspect lines for the Debug Ritual",
+    description=(
+        "Called ONLY for Tier 2 / Tier 3 errors before the mission is shown. "
+        "Returns a friendly error summary (Step 1) and a list of suspect source "
+        "lines (Step 2) that the student examines before writing their hypothesis."
+    ),
+)
+async def ritual_context(
+    request_body: RitualContextRequest,
+    request: Request,
+) -> RitualContextResponse:
+    request_id = _request_id(request)
+    logger.info(
+        "[%s] POST /ritual-context | language=%r  errorCode=%r  line=%d",
+        request_id,
+        request_body.language,
+        request_body.errorCode,
+        request_body.lineNumber,
+    )
+
+    result = groq_service.generate_ritual_context(
+        language=request_body.language,
+        error_code=request_body.errorCode,
+        message=request_body.message,
+        source_code=request_body.sourceCode,
+        line_number=request_body.lineNumber,
+        terminal_output=request_body.terminalOutput,
+    )
+
+    return RitualContextResponse(
+        errorSummary=result.error_summary,
+        errorLines=[{"line": el["line"], "text": el["text"]} for el in result.error_lines],
+        fallback=result.fallback,
+    )
+
+
+# ---------------------------------------------------------------------------
+# POST /v1/missions/evaluate-hypothesis
+# ---------------------------------------------------------------------------
+
+from backend.models.schemas import EvaluateHypothesisRequest, EvaluateHypothesisResponse
+
+@router.post(
+    "/evaluate-hypothesis",
+    response_model=EvaluateHypothesisResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Evaluate a student's hypothesis",
+)
+async def evaluate_hypothesis(
+    request_body: EvaluateHypothesisRequest,
+    request: Request,
+) -> EvaluateHypothesisResponse:
+    request_id = _request_id(request)
+    logger.info("[%s] POST /evaluate-hypothesis", request_id)
+
+    result = await groq_service.evaluate_hypothesis_llm(
+        user_hypothesis=request_body.user_hypothesis,
+        actual_error=request_body.actual_error,
+        code_snippet=request_body.code_snippet,
+    )
+
+    return EvaluateHypothesisResponse(
+        status=result["status"],
+        nudge=result["nudge"],
     )
 
 

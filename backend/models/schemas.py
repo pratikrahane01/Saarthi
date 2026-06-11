@@ -394,3 +394,59 @@ class TierClassifyResponse(BaseModel):
             }
         }
     }
+
+
+# ---------------------------------------------------------------------------
+# Ritual Context Models
+# ---------------------------------------------------------------------------
+
+class ErrorLine(BaseModel):
+    """A single line of source code that is a suspect for the error."""
+    line: int = Field(..., description="1-indexed line number.")
+    text: str = Field(..., description="The text content of that line.")
+
+
+class RitualContextRequest(BaseModel):
+    """Payload for POST /v1/missions/ritual-context."""
+
+    language: str = Field(..., examples=["python"])
+    errorCode: str = Field(..., examples=["TypeError"])
+    message: str = Field(..., examples=["name 'x' is not defined"])
+    lineNumber: int = Field(default=0, examples=[14])
+    sourceCode: str = Field(default="")
+    terminalOutput: str = Field(default="")
+
+
+class RitualContextResponse(BaseModel):
+    """
+    Read-only content shown during the Debug Ritual.
+    Step 1 shows errorSummary; Step 2 shows errorLines.
+    """
+    errorSummary: str = Field(
+        ...,
+        description="Plain-English 2-3 sentence explanation of the error (no code, no fix).",
+    )
+    errorLines: list[ErrorLine] = Field(
+        default_factory=list,
+        description="Source lines near the error that the student should examine.",
+    )
+    fallback: bool = Field(
+        default=False,
+        description="True if the Groq API was unavailable and defaults were used.",
+    )
+
+# ---------------------------------------------------------------------------
+# Evaluate Hypothesis Models
+# ---------------------------------------------------------------------------
+
+class EvaluateHypothesisRequest(BaseModel):
+    """Payload for POST /v1/missions/evaluate-hypothesis."""
+    user_hypothesis: str
+    actual_error: str
+    code_snippet: str
+
+class EvaluateHypothesisResponse(BaseModel):
+    """Result of hypothesis evaluation."""
+    status: str = Field(..., description="PASS, CLOSE, or FAIL")
+    nudge: str = Field(..., description="Socratic nudge or empty string")
+
