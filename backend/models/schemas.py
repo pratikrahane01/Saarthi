@@ -477,6 +477,10 @@ class ErrorRegion(BaseModel):
         ...,
         description="Plain-English 1-2 sentence explanation of what might be wrong here.",
     )
+    formattedRange: str = Field(
+        ...,
+        description="Line range formatted exactly as ' #L<start> - <end> ' or ' #L<start> '.",
+    )
 
 
 class AnalyzeErrorsResponse(BaseModel):

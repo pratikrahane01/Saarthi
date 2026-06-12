@@ -1772,7 +1772,7 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             const hypInput = document.getElementById('tier2-hypothesis-input');
             
             if (errorLineDisplay) {
-                errorLineDisplay.textContent = region.lineStart === region.lineEnd ? '#L' + String(region.lineStart) : '#L' + String(region.lineStart) + '-' + String(region.lineEnd);
+                errorLineDisplay.textContent = region.formattedRange || (region.lineStart === region.lineEnd ? '#L' + String(region.lineStart) : '#L' + String(region.lineStart) + '-' + String(region.lineEnd));
             }
             if (expSummary) {
                 expSummary.textContent = region.meaning;

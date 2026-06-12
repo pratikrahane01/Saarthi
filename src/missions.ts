@@ -71,7 +71,7 @@ export interface Mission {
     /** 1-indexed line number where the error was detected */
     errorLineNumber?: number;
     /** Tier 2 Multi-Error Regions */
-    errorRegions?: { lineStart: number; lineEnd: number; meaning: string }[];
+    errorRegions?: { lineStart: number; lineEnd: number; meaning: string; formattedRange?: string }[];
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -548,6 +548,33 @@ export async function matchWholeFileToMission(fullCode: string, languageId: stri
     } catch (e) {
         LOG.appendLine(`[matchWholeFileToMission] Tier classification failed (non-fatal): ${e}`);
         mission.tier = 2; // safe default
+    }
+
+    if (mission.tier === 2) {
+        try {
+            const ANALYZE_ERRORS_URL = 'http://127.0.0.1:8000/v1/missions/analyze-errors';
+            const analyzeResp = await fetch(ANALYZE_ERRORS_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    language: languageId,
+                    errorCode: "FILE_ANALYSIS",
+                    message: "Full File Analysis",
+                    sourceCode: fullCode,
+                    lineNumber: 0,
+                    terminalOutput: "",
+                }),
+            });
+            if (analyzeResp.ok) {
+                const data = await analyzeResp.json() as { regions: any[] };
+                if (data.regions && data.regions.length > 0) {
+                    mission.errorRegions = data.regions;
+                    LOG.appendLine(`[matchWholeFileToMission] Tier 2 analyze-errors returned ${data.regions.length} regions`);
+                }
+            }
+        } catch (e) {
+            LOG.appendLine(`[matchWholeFileToMission] Tier 2 analyze-errors failed: ${e}`);
+        }
     }
 
     LOG.appendLine(`[matchWholeFileToMission] ✓ File Mission matched: id="${mission.id}" title="${mission.title}"`);

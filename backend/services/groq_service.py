@@ -649,10 +649,14 @@ def analyze_error_regions(
     api_key = os.environ.get("GROQ_API_KEY1") or os.environ.get("GROQ_API_KEY")
     
     # Base fallback if API is unavailable or fails
+    fallback_start = line_number if line_number > 0 else 1
+    fallback_end = line_number if line_number > 0 else 1
+    fallback_fmt = f" #L{fallback_start} - {fallback_end} " if fallback_start != fallback_end else f" #L{fallback_start} "
     fallback_region = ErrorRegion(
-        lineStart=line_number if line_number > 0 else 1,
-        lineEnd=line_number if line_number > 0 else 1,
-        meaning=f"The primary error was reported here: {message}. Look closely at the logic."
+        lineStart=fallback_start,
+        lineEnd=fallback_end,
+        meaning=f"The primary error was reported here: {message}. Look closely at the logic.",
+        formattedRange=fallback_fmt
     )
 
     if not api_key or Groq is None:
@@ -720,7 +724,13 @@ def analyze_error_regions(
             start = int(r.get("lineStart", 1))
             end = int(r.get("lineEnd", start))
             meaning = str(r.get("meaning", "Inspect this region for potential logic errors."))
-            regions.append(ErrorRegion(lineStart=start, lineEnd=end, meaning=meaning))
+            formatted_range = f" #L{start} - {end} " if start != end else f" #L{start} "
+            regions.append(ErrorRegion(
+                lineStart=start,
+                lineEnd=end,
+                meaning=meaning,
+                formattedRange=formatted_range
+            ))
             
         return regions[:4]  # cap at 4 regions max
         
