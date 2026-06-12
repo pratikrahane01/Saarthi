@@ -232,6 +232,14 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                 this._goToLine(message.line);
                 break;
 
+            case 'CHANGE_PAGE':
+                this._handleChangePage(message.direction);
+                break;
+
+            case 'GAMES_CLICKED':
+                vscode.window.showInformationMessage('Launching Socratic Games! Check back soon for interactive exercises.');
+                break;
+
             default:
                 console.log('Zero-Magic Sidebar: Unknown message type', message.type);
         }
@@ -443,6 +451,55 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
         this._postState();
     }
 
+    private async _handleChangePage(direction: 'prev' | 'next') {
+        if (direction === 'prev') {
+            if (this._currentPage > 1) {
+                this._currentPage--;
+                this._postState();
+            }
+        } else {
+            if (this._currentPage < 3) {
+                if (this._currentPage === 1 && !this._expertSolution && this._currentMission) {
+                    await this._fetchSolutionOnly();
+                }
+                this._currentPage++;
+                this._postState();
+            }
+        }
+    }
+
+    private async _fetchSolutionOnly() {
+        if (!this._currentMission) return;
+
+        let sourceCode = '';
+        if (this._currentMission.targetUri) {
+            try {
+                const doc = await vscode.workspace.openTextDocument(vscode.Uri.parse(this._currentMission.targetUri));
+                sourceCode = doc.getText();
+            } catch (e) {
+                console.error("Could not read source code", e);
+            }
+        }
+
+        const request: SolutionRequest = {
+            language: this._currentMission.language,
+            errorCode: this._currentMission.originalErrorCode,
+            diagnosticMessage: this._currentMission.originalMessage,
+            sourceCode: sourceCode
+        };
+
+        const result = await fetchExpertSolution(request);
+        if (result) {
+            this._expertSolution = result;
+        } else {
+            this._expertSolution = {
+                fixedCode: "// Failed to load solution",
+                explanation: "There was a network error reaching the backend.",
+                conceptSummary: "Please check if the backend server is running."
+            };
+        }
+    }
+
     private async _cycleErrors(direction: 'next' | 'prev') {
         const diagnostics = vscode.languages.getDiagnostics();
         const errorEvents: any[] = [];
@@ -622,7 +679,9 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                     await this._saveStepHistory(false);
                 } else {
                     if (mission.tier === 2) {
-                        this._currentState = 'QUESTIONING';
+                        await this._fetchSolutionOnly();
+                        this._currentPage = 2;
+                        this._currentState = 'SOLUTION';
                     } else {
                         this._currentState = 'FAILED';
                     }
@@ -640,7 +699,13 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                 this._currentState = 'FAILED';
                 await this._saveStepHistory(false);
             } else {
-                this._currentState = 'FAILED';
+                if (mission.tier === 2) {
+                    await this._fetchSolutionOnly();
+                    this._currentPage = 2;
+                    this._currentState = 'SOLUTION';
+                } else {
+                    this._currentState = 'FAILED';
+                }
             }
             this._postState();
         } finally {
@@ -901,8 +966,8 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
         .content {
             display: flex;
             flex-direction: column;
-            padding: 20px;
-            gap: 20px;
+            padding: 8px;
+            gap: 10px;
             flex-grow: 1;
         }
 
@@ -911,11 +976,11 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             background-color: rgba(0, 0, 0, 0.1);
             border: 1px dashed rgba(166, 172, 205, 0.25);
             border-radius: 8px;
-            padding: 20px;
+            padding: 10px;
             display: flex;
             flex-direction: column;
             gap: 12px;
-            min-height: 45vh;
+            flex: 1;
             overflow-y: auto;
             transition: all 0.2s ease;
         }
@@ -927,6 +992,226 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             text-transform: uppercase;
             letter-spacing: 0.08em;
             margin-bottom: 4px;
+        }
+
+        /* Retro Socratic Card Styles */
+        .socratic-card {
+            border: 1px dashed rgba(166, 172, 205, 0.25);
+            border-radius: 6px;
+            background-color: rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            flex: 1.5;
+            min-height: 180px;
+        }
+
+        .socratic-card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 14px 8px;
+            border-bottom: 1px dashed rgba(166, 172, 205, 0.15);
+        }
+
+        .socratic-card-title {
+            font-size: 0.85rem;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: #f29879;
+        }
+
+        .socratic-card-body {
+            padding: 12px 14px 14px;
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .socratic-card-text {
+            font-size: 0.82rem;
+            line-height: 1.6;
+            color: #a6accd;
+            flex: 1;
+            overflow-y: auto;
+        }
+
+        .socratic-textarea {
+            width: 100%;
+            box-sizing: border-box;
+            background: transparent;
+            border: none;
+            color: #e6edf3;
+            font-family: 'DM Mono', monospace;
+            font-size: 0.82rem;
+            line-height: 1.5;
+            resize: none;
+            outline: none;
+            flex: 1;
+        }
+
+        .socratic-btn-hint {
+            width: 42px;
+            height: 42px;
+            flex-shrink: 0;
+            border-radius: 6px;
+            border: 1px solid rgba(166, 172, 205, 0.25);
+            background: transparent;
+            color: #a6accd;
+            font-size: 1.1rem;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s ease;
+        }
+
+        .socratic-btn-hint:hover {
+            color: #c3e88d;
+            border-color: #c3e88d;
+            background: rgba(195, 232, 141, 0.05);
+        }
+
+        .socratic-btn-submit {
+            flex: 1;
+            height: 42px;
+            border-radius: 6px;
+            border: 1px solid #f29879;
+            background: #f29879;
+            color: #13141c;
+            font-family: inherit;
+            font-weight: 700;
+            font-size: 0.85rem;
+            cursor: pointer;
+            letter-spacing: 0.05em;
+            transition: all 0.2s ease;
+        }
+
+        .socratic-btn-submit:hover {
+            background: #efa88d;
+            border-color: #efa88d;
+        }
+
+        .socratic-btn-games {
+            height: 32px;
+            border-radius: 6px;
+            border: 1px dashed rgba(166, 172, 205, 0.4);
+            background: transparent;
+            color: #f29879;
+            font-family: inherit;
+            font-weight: 700;
+            font-size: 0.8rem;
+            cursor: pointer;
+            letter-spacing: 0.05em;
+            transition: all 0.2s ease;
+        }
+
+        .socratic-btn-games:hover {
+            background: rgba(242, 152, 121, 0.08);
+            border-color: #f29879;
+        }
+
+        #btn-page2-submit {
+            height: 32px;
+            font-size: 0.8rem;
+            flex: none;
+        }
+
+        .socratic-explanation-card {
+            border: 1px dashed rgba(56, 189, 248, 0.3);
+            border-radius: 6px;
+            overflow: hidden;
+            background: rgba(56, 189, 248, 0.04);
+            display: flex;
+            flex-direction: column;
+            flex: 1;
+            height: 280px;
+            min-height: 280px;
+        }
+
+        .socratic-explanation-header {
+            padding: 8px 14px;
+            border-bottom: 1px dashed rgba(56, 189, 248, 0.2);
+            font-size: 0.75rem;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: #38bdf8;
+        }
+
+        .socratic-explanation-text {
+            padding: 12px 14px;
+            font-size: 0.82rem;
+            line-height: 1.6;
+            color: #a6accd;
+            flex: 1;
+            overflow-y: auto;
+        }
+
+        /* Page Navigation Buttons styling */
+        .page-nav-btn {
+            background: none;
+            border: none;
+            color: #f29879;
+            cursor: pointer;
+            font-family: inherit;
+            font-size: 0.95rem;
+            font-weight: bold;
+            padding: 2px 8px;
+            transition: all 0.2s ease;
+        }
+        .page-nav-btn:hover {
+            opacity: 0.8;
+            transform: scale(1.15);
+        }
+
+        /* Retro Socratic Line Navigator Styles */
+        .error-navigator-container {
+            display: none;
+            align-items: center;
+            gap: 0;
+            background: rgba(0, 0, 0, 0.1);
+            border: 1px solid rgba(242, 152, 121, 0.25);
+            border-radius: 6px;
+            overflow: hidden;
+        }
+
+        .error-navigator-btn {
+            background: none;
+            border: none;
+            color: #f29879;
+            font-family: 'DM Mono', monospace;
+            font-size: 0.85rem;
+            padding: 3px 8px;
+            cursor: pointer;
+            line-height: 1;
+            transition: background 0.15s;
+        }
+
+        #btn-error-prev.error-navigator-btn {
+            border-right: 1px solid rgba(242, 152, 121, 0.15);
+        }
+
+        #btn-error-next.error-navigator-btn {
+            border-left: 1px solid rgba(242, 152, 121, 0.15);
+        }
+
+        .error-navigator-btn:hover {
+            background: rgba(242, 152, 121, 0.05);
+        }
+
+        .error-navigator-display {
+            color: #f29879;
+            font-family: 'DM Mono', monospace;
+            font-size: 0.80rem;
+            padding: 3px 8px;
+            min-width: 28px;
+            text-align: center;
+            letter-spacing: 0.04em;
+            cursor: default;
+            user-select: none;
         }
 
         .question-text {
@@ -1158,7 +1443,7 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
         .ritual-code-block { font-family: 'DM Mono', monospace; font-size: 0.8rem; line-height: 1.7; color: #c5cdd8; }
         .ritual-subtitle { font-size: 0.85rem; line-height: 1.6; color: rgba(166,172,205,0.8); }
         .ritual-highlight { color: #e6edf3; }
-        .ritual-textarea { width: 100%; background: rgba(0,0,0,0.2); border: 1px dashed rgba(166,172,205,0.2); border-radius: 6px; color: #e6edf3; padding: 10px; font-family: inherit; font-size: 0.85rem; resize: vertical; outline: none; transition: border-color 0.2s ease; }
+        .ritual-textarea { width: 100%; background: rgba(0,0,0,0.2); border: 1px dashed rgba(166,172,205,0.2); border-radius: 6px; color: #e6edf3; padding: 10px; font-family: inherit; font-size: 0.82rem; resize: vertical; outline: none; transition: border-color 0.2s ease; }
         .ritual-textarea:focus { border-color: rgba(242,152,121,0.5); }
         .ritual-counter { font-size: 0.78rem; color: rgba(166,172,205,0.5); }
         .ritual-skip-link { color: rgba(166,172,205,0.45); font-size: 0.75rem; text-decoration: underline; transition: color 0.2s ease; }
@@ -1169,7 +1454,7 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
             background-color: #09090b;
             color: #a1a1aa;
-            padding: 24px 16px;
+            padding: 0;
         }
 
         body.theme-startup .terminal-window {
@@ -1177,8 +1462,8 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
         }
 
         body.theme-startup .content {
-            padding: 0;
-            gap: 16px;
+            padding: 8px;
+            gap: 10px;
         }
 
         body.theme-startup .main-panel {
@@ -1186,7 +1471,7 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             border: 1px solid #27272a;
             border-radius: 12px;
             box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
-            padding: 24px;
+            padding: 10px;
         }
 
         body.theme-startup .main-panel:hover {
@@ -1240,10 +1525,10 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
         body.theme-startup .btn {
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
             border-radius: 8px;
-            font-size: 0.9rem;
+            font-size: 0.82rem;
             font-weight: 600;
             transition: all 0.2s ease;
-            height: 42px;
+            height: 38px;
         }
 
         body.theme-startup .btn:active {
@@ -1337,8 +1622,24 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
         body.theme-startup .ritual-step-indicator.active { background-color: #8b5cf6; }
         body.theme-startup .ritual-step-indicator.inactive { background-color: #27272a; }
         body.theme-startup .ritual-title-text { color: #8b5cf6 !important; }
-        body.theme-startup .ritual-card-info { background: rgba(139, 92, 246, 0.05); border: 1px solid #3f3f46; }
-        body.theme-startup .ritual-card-warning { background: rgba(14, 165, 233, 0.05); border: 1px solid #3f3f46; }
+        body.theme-startup .ritual-card-info {
+            background: rgba(139, 92, 246, 0.05);
+            border: 1px solid #3f3f46;
+            transition: border-color 0.3s ease, box-shadow 0.3s ease;
+        }
+        body.theme-startup .ritual-card-info:hover {
+            border-color: rgba(139, 92, 246, 0.6);
+            box-shadow: 0 -2px 6px rgba(139, 92, 246, 0.4);
+        }
+        body.theme-startup .ritual-card-warning {
+            background: rgba(14, 165, 233, 0.05);
+            border: 1px solid #3f3f46;
+            transition: border-color 0.3s ease, box-shadow 0.3s ease;
+        }
+        body.theme-startup .ritual-card-warning:hover {
+            border-color: rgba(14, 165, 233, 0.6);
+            box-shadow: 0 -2px 6px rgba(14, 165, 233, 0.4);
+        }
         body.theme-startup .ritual-card-title { color: #a78bfa; font-weight: 600; font-family: 'Inter', sans-serif; }
         body.theme-startup .ritual-card-title-warning { color: #38bdf8; }
         body.theme-startup .ritual-code-block { font-family: 'Fira Code', monospace; color: #d4d4d8; }
@@ -1350,12 +1651,120 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
         body.theme-startup .ritual-skip-link { color: #71717a; }
         body.theme-startup .ritual-skip-link:hover { color: #a1a1aa; }
 
+        /* Startup theme overrides for Socratic Cards & Buttons */
+        body.theme-startup .socratic-card {
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 14px;
+            background: rgba(255, 255, 255, 0.03);
+            transition: border-color 0.3s ease, box-shadow 0.3s ease;
+        }
+        body.theme-startup .socratic-card:hover {
+            border-color: rgba(139, 92, 246, 0.6);
+            box-shadow: 0 -2px 6px rgba(139, 92, 246, 0.4);
+        }
+        body.theme-startup .socratic-card-header {
+            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+        }
+        body.theme-startup .socratic-card-title {
+            color: rgba(255, 255, 255, 0.45);
+        }
+        body.theme-startup .socratic-card-text {
+            color: rgba(255, 255, 255, 0.75);
+        }
+        body.theme-startup .socratic-textarea {
+            color: rgba(255, 255, 255, 0.8);
+        }
+        body.theme-startup .socratic-btn-hint {
+            border-radius: 10px;
+            border: 1px solid rgba(244, 63, 94, 0.35);
+            background: rgba(244, 63, 94, 0.07);
+            color: #f43f5e;
+        }
+        body.theme-startup .socratic-btn-hint:hover {
+            background: rgba(244, 63, 94, 0.15);
+        }
+        body.theme-startup .socratic-btn-submit {
+            border-radius: 10px;
+            border: none;
+            background: rgba(255, 255, 255, 0.9);
+            color: #09090b;
+        }
+        body.theme-startup .socratic-btn-submit:hover {
+            background: rgba(255, 255, 255, 1);
+        }
+        body.theme-startup .socratic-btn-games {
+            border-radius: 8px;
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            background: rgba(255, 255, 255, 0.04);
+            color: rgba(255, 255, 255, 0.9);
+            font-family: inherit;
+            font-size: 0.8rem;
+            cursor: pointer;
+            height: 32px;
+        }
+        body.theme-startup .socratic-btn-games:hover {
+            background: rgba(255, 255, 255, 0.1);
+            border-color: rgba(255, 255, 255, 0.3);
+        }
+        body.theme-startup #btn-page2-submit {
+            height: 32px;
+            font-size: 0.8rem;
+            border-radius: 8px;
+            flex: none;
+        }
+        body.theme-startup .socratic-explanation-card {
+            border: 1px solid rgba(56, 189, 248, 0.2);
+            border-radius: 12px;
+            background: rgba(56, 189, 248, 0.04);
+            transition: border-color 0.3s ease, box-shadow 0.3s ease;
+        }
+        body.theme-startup .socratic-explanation-card:hover {
+            border-color: rgba(56, 189, 248, 0.6);
+            box-shadow: 0 -2px 6px rgba(56, 189, 248, 0.4);
+        }
+        body.theme-startup .socratic-explanation-header {
+            border-bottom: 1px solid rgba(56, 189, 248, 0.15);
+        }
+        body.theme-startup .socratic-explanation-text {
+            color: rgba(255, 255, 255, 0.75);
+        }
+
+        body.theme-startup .error-navigator-container {
+            background: rgba(167, 139, 250, 0.08);
+            border: 1px solid rgba(167, 139, 250, 0.25);
+            border-radius: 8px;
+        }
+
+        body.theme-startup .error-navigator-btn {
+            color: #a78bfa;
+        }
+
+        body.theme-startup #btn-error-prev.error-navigator-btn {
+            border-right: 1px solid rgba(167, 139, 250, 0.2);
+        }
+
+        body.theme-startup #btn-error-next.error-navigator-btn {
+            border-left: 1px solid rgba(167, 139, 250, 0.2);
+        }
+
+        body.theme-startup .error-navigator-btn:hover {
+            background: rgba(167, 139, 250, 0.08);
+        }
+
+        body.theme-startup .error-navigator-display {
+            color: #a78bfa;
+        }
+
+        body.theme-startup .page-nav-btn {
+            color: #fafafa;
+        }
+
         /* ── THE "NATIVE VS CODE" CHAMELEON THEME ── */
         body.theme-native {
             font-family: var(--vscode-font-family), sans-serif;
             background-color: var(--vscode-sideBar-background);
             color: var(--vscode-foreground);
-            padding: 24px 16px;
+            padding: 0;
         }
 
         body.theme-native .terminal-window {
@@ -1363,20 +1772,20 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
         }
 
         body.theme-native .content {
-            padding: 0;
-            gap: 16px;
+            padding: 8px;
+            gap: 10px;
         }
 
         body.theme-native .main-panel {
-            background: var(--vscode-editor-background);
-            border: 1px solid var(--vscode-widget-border);
+            background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+            border: 1px solid var(--vscode-panel-border, var(--vscode-sideBar-border, transparent));
             border-radius: 6px;
-            padding: 20px;
+            padding: 10px;
             box-shadow: none;
         }
 
         body.theme-native .main-panel:hover {
-            border-color: var(--vscode-widget-border);
+            border-color: var(--vscode-panel-border, var(--vscode-sideBar-border, transparent));
         }
 
         body.theme-native .section-header {
@@ -1410,7 +1819,7 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
 
         body.theme-native #theme-select {
             background-color: var(--vscode-sideBar-background) !important;
-            border: 1px solid var(--vscode-widget-border) !important;
+            border: 1px solid var(--vscode-panel-border, var(--vscode-sideBar-border, var(--vscode-input-border, rgba(128, 128, 128, 0.3)))) !important;
             color: var(--vscode-foreground) !important;
         }
 
@@ -1422,10 +1831,10 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
         body.theme-native .btn {
             font-family: var(--vscode-font-family), sans-serif;
             border-radius: 4px;
-            font-size: 0.9rem;
+            font-size: 0.82rem;
             border: 1px solid transparent;
             transition: all 0.2s ease;
-            height: 40px;
+            height: 38px;
         }
 
         body.theme-native .btn-solid {
@@ -1441,7 +1850,7 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
         body.theme-native .btn-outline {
             background: var(--vscode-button-secondaryBackground);
             color: var(--vscode-button-secondaryForeground);
-            border: 1px solid var(--vscode-widget-border);
+            border: 1px solid var(--vscode-panel-border, var(--vscode-sideBar-border, var(--vscode-button-border, rgba(128, 128, 128, 0.3))));
         }
 
         body.theme-native .btn-outline:hover {
@@ -1460,7 +1869,7 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
         }
 
         body.theme-native .result-box {
-            border: 1px solid var(--vscode-widget-border);
+            border: 1px solid var(--vscode-panel-border, var(--vscode-sideBar-border, var(--vscode-input-border, rgba(128, 128, 128, 0.3))));
             background: var(--vscode-editor-background);
         }
 
@@ -1506,8 +1915,26 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
         body.theme-native .ritual-step-indicator.inactive { background-color: var(--vscode-editorHoverWidget-background); }
         body.theme-native .ritual-title-text { color: var(--vscode-foreground) !important; font-family: var(--vscode-font-family); }
         body.theme-native .ritual-card { border-radius: 4px; border-style: solid; border-width: 1px; }
-        body.theme-native .ritual-card-info { background: var(--vscode-textBlockQuote-background); border-color: var(--vscode-textBlockQuote-border); border-left: 4px solid var(--vscode-textBlockQuote-border); }
-        body.theme-native .ritual-card-warning { background: var(--vscode-textBlockQuote-background); border-color: var(--vscode-textBlockQuote-border); border-left: 4px solid var(--vscode-editorWarning-foreground); }
+        body.theme-native .ritual-card-info {
+            background: var(--vscode-textBlockQuote-background);
+            border: 1px solid var(--vscode-textBlockQuote-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.25)));
+            border-left: 4px solid var(--vscode-textBlockQuote-border, var(--vscode-panel-border, var(--vscode-focusBorder, #007acc)));
+            transition: border-color 0.3s ease, box-shadow 0.3s ease;
+        }
+        body.theme-native .ritual-card-info:hover {
+            border-color: var(--vscode-focusBorder);
+            box-shadow: 0 -2px 6px var(--vscode-focusBorder);
+        }
+        body.theme-native .ritual-card-warning {
+            background: var(--vscode-textBlockQuote-background);
+            border: 1px solid var(--vscode-textBlockQuote-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.25)));
+            border-left: 4px solid var(--vscode-editorWarning-foreground, var(--vscode-focusBorder, #f29879));
+            transition: border-color 0.3s ease, box-shadow 0.3s ease;
+        }
+        body.theme-native .ritual-card-warning:hover {
+            border-color: var(--vscode-focusBorder);
+            box-shadow: 0 -2px 6px var(--vscode-focusBorder);
+        }
         body.theme-native .ritual-card-title { color: var(--vscode-descriptionForeground); font-family: var(--vscode-font-family); text-transform: none; font-size: 0.85rem; font-weight: bold; }
         body.theme-native .ritual-card-title-warning { color: var(--vscode-editorWarning-foreground); }
         body.theme-native .ritual-code-block { font-family: var(--vscode-editor-font-family); color: var(--vscode-editor-foreground); background-color: var(--vscode-textCodeBlock-background); padding: 4px; border-radius: 4px; }
@@ -1539,13 +1966,14 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             to   { opacity: 1; }
         }
         .hint-modal-box {
-            background: #1e1f28;
-            border: 1px solid rgba(167, 139, 250, 0.25);
-            border-radius: 14px;
+            background: #13141c;
+            border: 1px dashed rgba(242, 152, 121, 0.4);
+            border-radius: 6px;
             width: 90%;
             max-width: 360px;
             padding: 0;
-            box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+            box-shadow: 0 8px 30px rgba(0,0,0,0.6);
+            font-family: 'DM Mono', 'Courier New', monospace;
             animation: hintSlideUp 0.25s ease;
         }
         @keyframes hintSlideUp {
@@ -1563,12 +1991,13 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             font-weight: 700;
             letter-spacing: 0.1em;
             text-transform: uppercase;
-            color: #a78bfa;
+            color: #f29879;
+            font-family: 'DM Mono', 'Courier New', monospace;
         }
         .hint-modal-close {
             background: none;
             border: none;
-            color: rgba(255,255,255,0.4);
+            color: rgba(242, 152, 121, 0.6);
             font-size: 1.1rem;
             cursor: pointer;
             padding: 2px 6px;
@@ -1576,26 +2005,28 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             transition: color 0.15s, background 0.15s;
         }
         .hint-modal-close:hover {
-            color: #fff;
-            background: rgba(255,255,255,0.08);
+            color: #f29879;
+            background: rgba(242, 152, 121, 0.08);
         }
         .hint-modal-divider {
             border: none;
-            border-top: 1px dashed rgba(167, 139, 250, 0.2);
+            border-top: 1px dashed rgba(242, 152, 121, 0.25);
             margin: 0 18px;
         }
         .hint-modal-body {
             padding: 14px 18px 10px;
-            font-size: 0.88rem;
+            font-size: 0.82rem;
             line-height: 1.65;
-            color: rgba(255,255,255,0.82);
+            color: #a6accd;
             min-height: 60px;
+            font-family: 'DM Mono', 'Courier New', monospace;
         }
         .hint-modal-counter {
             padding: 0 18px 6px;
             font-size: 0.7rem;
-            color: rgba(255,255,255,0.3);
+            color: rgba(242, 152, 121, 0.5);
             letter-spacing: 0.06em;
+            font-family: 'DM Mono', 'Courier New', monospace;
         }
         .hint-modal-actions {
             display: flex;
@@ -1605,21 +2036,22 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
         .hint-modal-btn {
             flex: 1;
             height: 36px;
-            border-radius: 8px;
-            font-family: inherit;
+            border-radius: 6px;
+            font-family: 'DM Mono', 'Courier New', monospace;
             font-size: 0.8rem;
-            font-weight: 600;
+            font-weight: 700;
             cursor: pointer;
             transition: all 0.15s ease;
             letter-spacing: 0.03em;
         }
         .hint-btn-next {
-            background: #a78bfa;
-            color: #0e0e14;
-            border: none;
+            background: #f29879;
+            color: #13141c;
+            border: 1px solid #f29879;
         }
         .hint-btn-next:hover {
-            background: #c4b5fd;
+            background: #efa88d;
+            border-color: #efa88d;
         }
         .hint-btn-next:disabled {
             opacity: 0.35;
@@ -1627,46 +2059,115 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
         }
         .hint-btn-quit {
             background: transparent;
-            color: rgba(255,255,255,0.55);
-            border: 1px solid rgba(255,255,255,0.12);
+            color: #f29879;
+            border: 1px dashed rgba(242, 152, 121, 0.4);
         }
         .hint-btn-quit:hover {
-            color: #fff;
-            border-color: rgba(255,255,255,0.3);
+            background: rgba(242, 152, 121, 0.08);
+            border-color: #f29879;
         }
 
         /* ── HINT MODAL: Startup theme override ── */
         body.theme-startup .hint-modal-box {
             background: #09090b;
-            border-color: rgba(139, 92, 246, 0.3);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 14px;
+            box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6);
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            transition: border-color 0.3s ease, box-shadow 0.3s ease;
+        }
+        body.theme-startup .hint-modal-box:hover {
+            border-color: rgba(139, 92, 246, 0.6);
+            box-shadow: 0 -2px 10px rgba(139, 92, 246, 0.35), 0 20px 50px rgba(0, 0, 0, 0.6);
         }
         body.theme-startup .hint-modal-title {
             color: #8b5cf6;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            font-weight: 600;
+            letter-spacing: 0.05em;
+        }
+        body.theme-startup .hint-modal-divider {
+            border-top: 1px solid rgba(255, 255, 255, 0.08);
+        }
+        body.theme-startup .hint-modal-body {
+            color: rgba(255, 255, 255, 0.85);
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            font-size: 0.82rem;
+        }
+        body.theme-startup .hint-modal-counter {
+            color: rgba(255, 255, 255, 0.4);
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+        }
+        body.theme-startup .hint-modal-btn {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            border-radius: 8px;
         }
         body.theme-startup .hint-btn-next {
             background: #8b5cf6;
+            color: #ffffff;
+            border: none;
         }
         body.theme-startup .hint-btn-next:hover {
             background: #a78bfa;
+        }
+        body.theme-startup .hint-btn-quit {
+            background: rgba(255, 255, 255, 0.04);
+            color: rgba(255, 255, 255, 0.8);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+        }
+        body.theme-startup .hint-btn-quit:hover {
+            background: rgba(255, 255, 255, 0.08);
+            border-color: rgba(255, 255, 255, 0.25);
+            color: #ffffff;
+        }
+        body.theme-startup .hint-modal-close {
+            color: rgba(255, 255, 255, 0.4);
+        }
+        body.theme-startup .hint-modal-close:hover {
+            color: #ffffff;
+            background: rgba(255, 255, 255, 0.08);
         }
 
         /* ── HINT MODAL: Native VS Code theme override ── */
         body.theme-native .hint-modal-box {
             background: var(--vscode-editor-background);
-            border-color: var(--vscode-widget-border);
+            border: 1px solid var(--vscode-panel-border, var(--vscode-sideBar-border, var(--vscode-input-border, rgba(128, 128, 128, 0.3))));
             border-radius: 6px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+            font-family: var(--vscode-font-family), sans-serif;
+            transition: border-color 0.3s ease, box-shadow 0.3s ease;
+        }
+        body.theme-native .hint-modal-box:hover {
+            border-color: var(--vscode-focusBorder);
+            box-shadow: 0 -2px 10px var(--vscode-focusBorder), 0 10px 30px rgba(0, 0, 0, 0.35);
         }
         body.theme-native .hint-modal-title {
             color: var(--vscode-foreground);
-            font-family: var(--vscode-font-family);
+            font-family: var(--vscode-font-family), sans-serif;
+            font-weight: bold;
+            letter-spacing: normal;
+            text-transform: none;
+        }
+        body.theme-native .hint-modal-divider {
+            border-top: 1px solid var(--vscode-panel-border, var(--vscode-sideBar-border, rgba(128, 128, 128, 0.2)));
         }
         body.theme-native .hint-modal-body {
             color: var(--vscode-editor-foreground);
-            font-family: var(--vscode-font-family);
+            font-family: var(--vscode-font-family), sans-serif;
+            font-size: 0.82rem;
+        }
+        body.theme-native .hint-modal-counter {
+            color: var(--vscode-descriptionForeground);
+            font-family: var(--vscode-font-family), sans-serif;
+        }
+        body.theme-native .hint-modal-btn {
+            font-family: var(--vscode-font-family), sans-serif;
+            border-radius: 4px;
         }
         body.theme-native .hint-btn-next {
             background: var(--vscode-button-background);
             color: var(--vscode-button-foreground);
+            border: none;
         }
         body.theme-native .hint-btn-next:hover {
             background: var(--vscode-button-hoverBackground);
@@ -1674,7 +2175,125 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
         body.theme-native .hint-btn-quit {
             background: var(--vscode-button-secondaryBackground);
             color: var(--vscode-button-secondaryForeground);
-            border-color: var(--vscode-widget-border);
+            border: 1px solid var(--vscode-button-border, var(--vscode-panel-border, var(--vscode-widget-border, rgba(128, 128, 128, 0.3))));
+        }
+        body.theme-native .hint-btn-quit:hover {
+            background: var(--vscode-button-secondaryHoverBackground);
+        }
+        body.theme-native .hint-modal-close {
+            color: var(--vscode-descriptionForeground);
+        }
+        body.theme-native .hint-modal-close:hover {
+            color: var(--vscode-foreground);
+            background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.08));
+        }
+
+        /* Native theme overrides for Socratic Cards & Buttons */
+        body.theme-native .socratic-card {
+            border: 1px solid var(--vscode-panel-border, var(--vscode-sideBar-border, var(--vscode-input-border, rgba(128, 128, 128, 0.3))));
+            border-radius: 6px;
+            background: var(--vscode-editor-background);
+            transition: border-color 0.3s ease, box-shadow 0.3s ease;
+        }
+        body.theme-native .socratic-card:hover {
+            border-color: var(--vscode-focusBorder);
+            box-shadow: 0 -2px 6px var(--vscode-focusBorder);
+        }
+        body.theme-native .socratic-card-header {
+            border-bottom: 1px solid var(--vscode-panel-border, var(--vscode-sideBar-border, var(--vscode-input-border, rgba(128, 128, 128, 0.2))));
+        }
+        body.theme-native .socratic-card-title {
+            color: var(--vscode-descriptionForeground);
+        }
+        body.theme-native .socratic-card-text {
+            color: var(--vscode-foreground);
+        }
+        body.theme-native .socratic-textarea {
+            color: var(--vscode-input-foreground);
+        }
+        body.theme-native .socratic-btn-hint {
+            border-radius: 6px;
+            border: 1px solid var(--vscode-button-border, var(--vscode-panel-border, var(--vscode-widget-border, rgba(128, 128, 128, 0.3))));
+            background: var(--vscode-button-secondaryBackground);
+            color: var(--vscode-button-secondaryForeground);
+        }
+        body.theme-native .socratic-btn-hint:hover {
+            background: var(--vscode-button-secondaryHoverBackground);
+        }
+        body.theme-native .socratic-btn-submit {
+            border-radius: 6px;
+            border: none;
+            background: var(--vscode-button-background);
+            color: var(--vscode-button-foreground);
+        }
+        body.theme-native .socratic-btn-submit:hover {
+            background: var(--vscode-button-hoverBackground);
+        }
+        body.theme-native .socratic-btn-games {
+            border-radius: 4px;
+            border: 1px solid var(--vscode-button-border, transparent);
+            background: var(--vscode-button-secondaryBackground);
+            color: var(--vscode-button-secondaryForeground);
+            font-family: inherit;
+            font-size: 0.8rem;
+            cursor: pointer;
+            height: 32px;
+        }
+        body.theme-native .socratic-btn-games:hover {
+            background: var(--vscode-button-secondaryHoverBackground);
+        }
+        body.theme-native #btn-page2-submit {
+            height: 32px;
+            font-size: 0.8rem;
+            border-radius: 4px;
+            flex: none;
+        }
+        body.theme-native .socratic-explanation-card {
+            border: 1px solid var(--vscode-panel-border, var(--vscode-sideBar-border, var(--vscode-input-border, rgba(128, 128, 128, 0.3))));
+            border-radius: 6px;
+            background: var(--vscode-textBlockQuote-background);
+            transition: border-color 0.3s ease, box-shadow 0.3s ease;
+        }
+        body.theme-native .socratic-explanation-card:hover {
+            border-color: var(--vscode-focusBorder);
+            box-shadow: 0 -2px 6px var(--vscode-focusBorder);
+        }
+        body.theme-native .socratic-explanation-header {
+            border-bottom: 1px solid var(--vscode-panel-border, var(--vscode-sideBar-border, var(--vscode-input-border, rgba(128, 128, 128, 0.2))));
+            color: var(--vscode-foreground);
+        }
+        body.theme-native .socratic-explanation-text {
+            color: var(--vscode-foreground);
+        }
+
+        body.theme-native .error-navigator-container {
+            background: var(--vscode-input-background);
+            border: 1px solid var(--vscode-panel-border, var(--vscode-sideBar-border, var(--vscode-input-border, rgba(128, 128, 128, 0.3))));
+            border-radius: 6px;
+        }
+
+        body.theme-native .error-navigator-btn {
+            color: var(--vscode-foreground);
+        }
+
+        body.theme-native #btn-error-prev.error-navigator-btn {
+            border-right: 1px solid var(--vscode-panel-border, var(--vscode-sideBar-border, var(--vscode-input-border, rgba(128, 128, 128, 0.2))));
+        }
+
+        body.theme-native #btn-error-next.error-navigator-btn {
+            border-left: 1px solid var(--vscode-panel-border, var(--vscode-sideBar-border, var(--vscode-input-border, rgba(128, 128, 128, 0.2))));
+        }
+
+        body.theme-native .error-navigator-btn:hover {
+            background: var(--vscode-button-secondaryHoverBackground);
+        }
+
+        body.theme-native .error-navigator-display {
+            color: var(--vscode-foreground);
+        }
+
+        body.theme-native .page-nav-btn {
+            color: var(--vscode-foreground);
         }
     </style>
 </head>
@@ -1741,79 +2360,23 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                 </div>
                 
                 <!-- Page 1 Paper Layout (Tier 2 wireframe-accurate) -->
-                <div id="page-1-layout" style="display: flex; flex-direction: column; gap: 0; margin-top: 12px;">
+                <div id="page-1-layout" style="display: flex; flex-direction: column; gap: 14px; margin-top: 12px; flex: 1; height: 100%; overflow: hidden; padding: 2px 4px; box-sizing: border-box;">
 
                     <!-- ───── MEANING CARD ───── -->
-                    <div id="meaning-card" style="
-                        border: 1px solid rgba(255,255,255,0.08);
-                        border-radius: 14px;
-                        overflow: hidden;
-                        background: rgba(255,255,255,0.03);
-                    ">
+                    <div id="meaning-card" class="socratic-card">
                         <!-- Card header row: "Meaning" label + < [line#] > error navigator -->
-                        <div style="
-                            display: flex;
-                            justify-content: space-between;
-                            align-items: center;
-                            padding: 10px 14px 8px;
-                            border-bottom: 1px solid rgba(255,255,255,0.06);
-                        ">
-                            <span style="font-size:0.78rem; font-weight:700; letter-spacing:0.08em; text-transform:uppercase; color: rgba(255,255,255,0.45);">Meaning</span>
+                        <div class="socratic-card-header">
+                            <span class="socratic-card-title">Meaning</span>
                             <!-- Error line navigator: < [12] > -->
-                            <div id="error-line-navigator" style="
-                                display: none;
-                                align-items: center;
-                                gap: 0;
-                                background: rgba(167,139,250,0.08);
-                                border: 1px solid rgba(167,139,250,0.25);
-                                border-radius: 8px;
-                                overflow: hidden;
-                            ">
-                                <button id="btn-error-prev" title="Previous error" style="
-                                    background: none;
-                                    border: none;
-                                    border-right: 1px solid rgba(167,139,250,0.2);
-                                    color: #a78bfa;
-                                    font-family: 'DM Mono', monospace;
-                                    font-size: 0.85rem;
-                                    padding: 3px 8px;
-                                    cursor: pointer;
-                                    line-height: 1;
-                                    transition: background 0.15s;
-                                ">&lt;</button>
-                                <span id="error-line-display" style="
-                                    color: #a78bfa;
-                                    font-family: 'DM Mono', monospace;
-                                    font-size: 0.8rem;
-                                    padding: 3px 8px;
-                                    min-width: 28px;
-                                    text-align: center;
-                                    letter-spacing: 0.04em;
-                                    cursor: default;
-                                    user-select: none;
-                                ">–</span>
-                                <button id="btn-error-next" title="Next error" style="
-                                    background: none;
-                                    border: none;
-                                    border-left: 1px solid rgba(167,139,250,0.2);
-                                    color: #a78bfa;
-                                    font-family: 'DM Mono', monospace;
-                                    font-size: 0.85rem;
-                                    padding: 3px 8px;
-                                    cursor: pointer;
-                                    line-height: 1;
-                                    transition: background 0.15s;
-                                ">&gt;</button>
+                            <div id="error-line-navigator" class="error-navigator-container">
+                                <button id="btn-error-prev" title="Previous error" class="error-navigator-btn">&lt;</button>
+                                <span id="error-line-display" class="error-navigator-display">–</span>
+                                <button id="btn-error-next" title="Next error" class="error-navigator-btn">&gt;</button>
                             </div>
                         </div>
                         <!-- Card body: error description -->
-                        <div style="padding: 12px 14px 14px;">
-                            <div id="explanation-error-summary" style="
-                                font-size: 0.88rem;
-                                line-height: 1.6;
-                                color: rgba(255,255,255,0.75);
-                                min-height: 80px;
-                            ">Loading...</div>
+                        <div class="socratic-card-body">
+                            <div id="explanation-error-summary" class="socratic-card-text">Loading...</div>
                         </div>
                     </div>
 
@@ -1831,7 +2394,7 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                             <b class="ritual-highlight" id="explanation-question-text">Before you can fix the error...</b><br>
                             Write your best guess — even if you're not sure. No code, just words.
                         </div>
-                        <textarea id="explanation-input" class="ritual-textarea" rows="4" placeholder="e.g. I think the variable is missing a value before being used..."></textarea>
+                        <textarea id="explanation-input" class="ritual-textarea" rows="6" placeholder="e.g. I think the variable is missing a value before being used..."></textarea>
                         <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 8px;">
                             <span id="explanation-counter" class="ritual-counter">0 / 20 min</span>
                             <button class="btn btn-solid btn-blue" id="btn-explanation-submit" style="width: auto; padding: 0 18px; opacity: 0.5;" disabled>Submit &amp; Start &rarr;</button>
@@ -1839,119 +2402,61 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                     </div>
 
                     <!-- ───── TIER 2: THINK CRITICALLY ───── -->
-                    <div id="tier2-hypothesis-section" style="display: none; margin-top: 14px;">
-                        <div style="
-                            border: 1px solid rgba(255,255,255,0.08);
-                            border-radius: 14px;
-                            overflow: hidden;
-                            background: rgba(255,255,255,0.03);
-                        ">
+                    <div id="tier2-hypothesis-section" style="display: none; flex: 1; flex-direction: column; overflow: hidden;">
+                        <div class="socratic-card">
                             <!-- Card header row -->
-                            <div style="
-                                display: flex;
-                                justify-content: space-between;
-                                align-items: center;
-                                padding: 10px 14px 8px;
-                                border-bottom: 1px solid rgba(255,255,255,0.06);
-                            ">
-                                <span style="font-size:0.78rem; font-weight:700; letter-spacing:0.08em; text-transform:uppercase; color: rgba(255,255,255,0.45);">Think critically</span>
+                            <div class="socratic-card-header">
+                                <span class="socratic-card-title">Think critically</span>
                             </div>
                             
                             <!-- Card body -->
-                            <div style="padding: 12px 14px 14px;">
+                            <div class="socratic-card-body">
                                 <textarea
                                     id="tier2-hypothesis-input"
-                                    rows="3"
+                                    rows="6"
                                     placeholder="Best guess"
-                                    style="
-                                        width: 100%;
-                                        box-sizing: border-box;
-                                        background: transparent;
-                                        border: none;
-                                        color: rgba(255,255,255,0.8);
-                                        font-family: 'DM Mono', monospace;
-                                        font-size: 0.85rem;
-                                        line-height: 1.5;
-                                        resize: vertical;
-                                        outline: none;
-                                    "
+                                    class="socratic-textarea"
                                 ></textarea>
                             </div>
                         </div>
                         <!-- Bottom row: Hint square + Submit pill -->
-                        <div style="display: flex; gap: 10px; margin-top: 10px; align-items: center;">
+                        <div style="display: flex; gap: 10px; margin-top: 10px; align-items: center; padding-bottom: 2px;">
                             <button
                                 id="btn-tier2-hint"
                                 title="Get a hint (costs 1 heart)"
-                                style="
-                                    width: 42px;
-                                    height: 42px;
-                                    flex-shrink: 0;
-                                    border-radius: 10px;
-                                    border: 1px solid rgba(244,63,94,0.35);
-                                    background: rgba(244,63,94,0.07);
-                                    color: #f43f5e;
-                                    font-size: 1.1rem;
-                                    cursor: pointer;
-                                    display: flex;
-                                    align-items: center;
-                                    justify-content: center;
-                                    transition: background 0.2s, transform 0.15s;
-                                "
+                                class="socratic-btn-hint"
                             >💡</button>
                             <button
                                 id="btn-tier2-submit"
-                                style="
-                                    flex: 1;
-                                    height: 42px;
-                                    border-radius: 10px;
-                                    border: none;
-                                    background: rgba(255,255,255,0.9);
-                                    color: #09090b;
-                                    font-weight: 700;
-                                    font-size: 0.9rem;
-                                    cursor: pointer;
-                                    letter-spacing: 0.03em;
-                                    transition: background 0.2s, transform 0.15s;
-                                "
-                            >Submit</button>
+                                class="socratic-btn-submit"
+                            >&gt; /submit</button>
                         </div>
                     </div>
 
-                    <!-- ───── TIER 2: EXPLANATION ROUNDS (Round 2 & 3) ───── -->
-                    <div id="tier2-explanation-section" style="display: none; margin-top: 14px;">
-                        <div style="
-                            border: 1px solid rgba(56,189,248,0.2);
-                            border-radius: 12px;
-                            overflow: hidden;
-                            background: rgba(56,189,248,0.04);
-                        ">
-                            <div style="padding: 8px 14px; border-bottom: 1px solid rgba(56,189,248,0.15); font-size:0.75rem; font-weight:700; letter-spacing:0.08em; text-transform:uppercase; color: #38bdf8;">Explanation</div>
-                            <div id="tier2-explanation-text" style="padding: 12px 14px; font-size: 0.88rem; line-height: 1.6; color: rgba(255,255,255,0.75);">Loading...</div>
-                        </div>
-                        <button
-                            id="btn-tier2-resubmit"
-                            style="
-                                width: 100%;
-                                height: 42px;
-                                border-radius: 10px;
-                                border: none;
-                                background: rgba(255,255,255,0.9);
-                                color: #09090b;
-                                font-weight: 700;
-                                font-size: 0.9rem;
-                                cursor: pointer;
-                                margin-top: 10px;
-                                letter-spacing: 0.03em;
-                                transition: background 0.2s, transform 0.15s;
-                            "
-                        >Submit Fix</button>
-                    </div>
+
 
                     <!-- Skip link -->
                     <div id="ritual-skip-container" style="display: none; text-align: center; margin-top: 8px;">
                         <a href="#" id="link-ritual-skip" class="ritual-skip-link">Skip ritual (Rank 3+)</a>
                     </div>
+                </div>
+
+                <!-- Page 2 Detailed Explanation Layout -->
+                <div id="page-2-layout" style="display: none; flex: 1; flex-direction: column; overflow: hidden; margin-top: 12px; padding: 2px 4px; box-sizing: border-box;">
+                    <div class="socratic-explanation-card" style="flex: 1;">
+                        <div class="socratic-explanation-header">Detailed Explanation</div>
+                        <div id="page-2-explanation-text" class="socratic-explanation-text">Loading...</div>
+                    </div>
+                    <button
+                        id="btn-page2-games"
+                        class="socratic-btn-games"
+                        style="margin-top: 8px; width: 100%; box-sizing: border-box;"
+                    >&gt; /games</button>
+                    <button
+                        id="btn-page2-submit"
+                        class="socratic-btn-submit"
+                        style="margin-top: 6px; width: 100%; box-sizing: border-box;"
+                    >&gt; /submit</button>
                 </div>
 
                 <div class="question-text" id="question-text" style="display: none; margin-top: 8px;"></div>
@@ -2009,7 +2514,13 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             const hypInput = document.getElementById('tier2-hypothesis-input');
             
             if (errorLineDisplay) {
-                errorLineDisplay.textContent = region.formattedRange || (region.lineStart === region.lineEnd ? '#L' + String(region.lineStart) : '#L' + String(region.lineStart) + '-' + String(region.lineEnd));
+                let rangeText = region.formattedRange || (region.lineStart === region.lineEnd ? '#' + String(region.lineStart) : '#' + String(region.lineStart) + '-' + String(region.lineEnd));
+                if (rangeText.startsWith('#L')) {
+                    rangeText = '#' + rangeText.substring(2);
+                } else if (rangeText.startsWith('L')) {
+                    rangeText = '#' + rangeText.substring(1);
+                }
+                errorLineDisplay.textContent = rangeText;
             }
             if (expSummary) {
                 expSummary.textContent = region.meaning;
@@ -2095,13 +2606,6 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                     const hypVal = hypInput ? hypInput.value : '';
                     vscode.postMessage({ type: 'SUBMIT_TIER2_ATTEMPT', hypothesis: hypVal });
                 }
-            });
-        }
-
-        const btnTier2Resubmit = document.getElementById('btn-tier2-resubmit');
-        if (btnTier2Resubmit) {
-            btnTier2Resubmit.addEventListener('click', () => {
-                vscode.postMessage({ type: 'SUBMIT_TIER2_ATTEMPT', hypothesis: '' });
             });
         }
 
@@ -2194,6 +2698,35 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             });
         });
 
+        const btnPagePrev = document.getElementById('btn-page-prev');
+        const btnPageNext = document.getElementById('btn-page-next');
+        if (btnPagePrev) {
+            btnPagePrev.addEventListener('click', () => {
+                vscode.postMessage({ type: 'CHANGE_PAGE', direction: 'prev' });
+            });
+        }
+        if (btnPageNext) {
+            btnPageNext.addEventListener('click', () => {
+                vscode.postMessage({ type: 'CHANGE_PAGE', direction: 'next' });
+            });
+        }
+
+        const btnPage2Submit = document.getElementById('btn-page2-submit');
+        if (btnPage2Submit) {
+            btnPage2Submit.addEventListener('click', () => {
+                runLoader(1500, "Running diagnostic verification...", () => {
+                    vscode.postMessage({ type: 'SUBMIT_ANSWER' });
+                });
+            });
+        }
+
+        const btnPage2Games = document.getElementById('btn-page2-games');
+        if (btnPage2Games) {
+            btnPage2Games.addEventListener('click', () => {
+                vscode.postMessage({ type: 'GAMES_CLICKED' });
+            });
+        }
+
         // Explanation / Ritual text input
         const explanationInput = document.getElementById('explanation-input');
         const explanationCounter = document.getElementById('explanation-counter');
@@ -2246,6 +2779,20 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             navDirection = navDirection === 'next' ? 'prev' : 'next';
         });
 
+        function updateButtonTexts() {
+            const btnTier2Submit = document.getElementById('btn-tier2-submit');
+            const btnPage2Submit = document.getElementById('btn-page2-submit');
+            const btnPage2Games = document.getElementById('btn-page2-games');
+            const theme = document.getElementById('theme-select')?.value || activeTheme;
+            
+            const submitText = (theme === 'retro') ? '> /submit' : 'Submit';
+            const gamesText = (theme === 'retro') ? '> /games' : 'GAMES';
+            
+            if (btnTier2Submit) btnTier2Submit.textContent = submitText;
+            if (btnPage2Submit) btnPage2Submit.textContent = submitText;
+            if (btnPage2Games) btnPage2Games.textContent = gamesText;
+        }
+
         // Theme switching logic
         const themeSelect = document.getElementById('theme-select');
         let activeTheme = 'retro';
@@ -2269,6 +2816,7 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
         } else if (activeTheme === 'native') {
             document.body.classList.add('theme-native');
         }
+        updateButtonTexts();
 
         if (themeSelect) {
             themeSelect.addEventListener('change', (e) => {
@@ -2287,6 +2835,7 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                 try {
                     localStorage.setItem('socratic-theme', theme);
                 } catch (err) {}
+                updateButtonTexts();
             });
         }
 
@@ -2405,6 +2954,8 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
 
                 if (page === 1) {
                     page1Layout.style.display = 'flex';
+                    const page2Layout = document.getElementById('page-2-layout');
+                    if (page2Layout) page2Layout.style.display = 'none';
                     questionText.style.display = 'none';
 
                     const ritualSkipContainer = document.getElementById('ritual-skip-container');
@@ -2466,8 +3017,15 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                             }
                         }
                     }
+                } else if (page === 2) {
+                    page1Layout.style.display = 'none';
+                    const page2Layout = document.getElementById('page-2-layout');
+                    if (page2Layout) page2Layout.style.display = 'flex';
+                    questionText.style.display = 'none';
                 } else {
                     page1Layout.style.display = 'none';
+                    const page2Layout = document.getElementById('page-2-layout');
+                    if (page2Layout) page2Layout.style.display = 'none';
                     questionText.style.display = 'block';
                 }
 
@@ -2531,7 +3089,13 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                     }
                 } else if (page === 2) {
                     panelTitle.textContent = "EXPLANATION";
-                    questionText.innerHTML = expertSolution ? expertSolution.explanation.replace(/\\n/g, '<br>') : "Detailed Explanation of the error";
+                    const page2ExpText = document.getElementById('page-2-explanation-text');
+                    const expContent = expertSolution ? expertSolution.explanation.replace(/\\n/g, '<br>') : "Detailed Explanation of the error";
+                    if (page2ExpText) {
+                        page2ExpText.innerHTML = expContent;
+                    } else {
+                        questionText.innerHTML = expContent;
+                    }
                 } else if (page === 3) {
                     panelTitle.textContent = "MISSION END";
                     if (hearts > 0) {
@@ -2547,12 +3111,21 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                 for (let i = 0; i < 3; i++) {
                     const span = document.createElement('span');
                     span.className = 'heart-icon';
+                    span.textContent = '♥';
                     if (i < hearts) {
-                        span.textContent = '♥';
                         span.style.color = '#ff5f56';
+                        span.style.webkitTextStroke = 'none';
                     } else {
-                        span.textContent = '♡';
-                        span.style.color = 'rgba(166, 172, 205, 0.2)';
+                        span.className = 'heart-icon empty';
+                        span.style.color = 'transparent';
+                        const theme = document.getElementById('theme-select')?.value || activeTheme;
+                        if (theme === 'startup') {
+                            span.style.webkitTextStroke = '1.2px rgba(255, 255, 255, 0.15)';
+                        } else if (theme === 'native') {
+                            span.style.webkitTextStroke = '1px var(--vscode-disabledForeground, rgba(255, 255, 255, 0.25))';
+                        } else {
+                            span.style.webkitTextStroke = '1px rgba(166, 172, 205, 0.35)';
+                        }
                     }
                     heartsCapsule.appendChild(span);
                 }
@@ -2610,6 +3183,7 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                         }
                     }
                 }
+                updateButtonTexts();
             }
         });
     </script>
