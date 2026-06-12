@@ -20,6 +20,8 @@ export interface DebugRitualState {
     errorLines?: ErrorLine[];
     /** The tier of this error (1=syntax, 2=logic, 3=runtime) */
     tier?: number;
+    /** Hash of the original diagnostic to prevent stale explanations */
+    diagnosticHash?: string;
 }
 
 export function getRitualState(context: vscode.ExtensionContext, missionId: string): DebugRitualState | null {
@@ -27,16 +29,19 @@ export function getRitualState(context: vscode.ExtensionContext, missionId: stri
     return rituals[missionId] || null;
 }
 
-export function initRitual(context: vscode.ExtensionContext, missionId: string): DebugRitualState {
+export function initRitual(context: vscode.ExtensionContext, missionId: string, diagnosticHash?: string): DebugRitualState {
     const rituals = context.workspaceState.get<{ [id: string]: DebugRitualState }>('zeroMagic.rituals') || {};
     
-    // If it exists, don't overwrite it
+    // If it exists, check if the diagnostic hash matches
     if (rituals[missionId]) {
-        return rituals[missionId];
+        if (!diagnosticHash || rituals[missionId].diagnosticHash === diagnosticHash) {
+            return rituals[missionId];
+        }
     }
     
     const newState: DebugRitualState = {
         missionId,
+        diagnosticHash,
         step: 0,
         step1Response: '',
         step2Response: '',

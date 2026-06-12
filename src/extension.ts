@@ -36,10 +36,14 @@ export async function activate(context: vscode.ExtensionContext) {
     // The legacy floating dashboard panel has been retired as primary UI.
     const renderDashboardCmd = vscode.commands.registerCommand(
         'zeroMagic.renderSocraticDashboard',
-        async (mission: Mission) => {
+        async (mission: Mission | 'MISSION_COMPLETE', payload?: any) => {
             if (SocraticSidebarProvider.instance) {
-                const skipAllowed = await canSkipRitual(globalContext);
-                SocraticSidebarProvider.instance.showMission(mission, skipAllowed);
+                if (mission === 'MISSION_COMPLETE') {
+                    SocraticSidebarProvider.instance.showMissionComplete(payload);
+                } else {
+                    const skipAllowed = await canSkipRitual(globalContext);
+                    SocraticSidebarProvider.instance.showMission(mission, skipAllowed);
+                }
             }
         }
     );

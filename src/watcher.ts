@@ -1,5 +1,8 @@
 import * as vscode from 'vscode';
-import { matchErrorToMission, executeMissionHandOff, matchWholeFileToMission, Mission } from './missions';
+import { matchErrorToMission, executeMissionHandOff, Mission } from './missions';
+import { getQueueState, startBugQueue, advanceBugQueue } from './bugQueue';
+import { awardXP } from './xpEngine';
+import { globalContext } from './extension';
 
 // Define the strict contract we agreed upon for Teammate 2
 export interface DiagnosticEvent {
@@ -12,6 +15,10 @@ export interface DiagnosticEvent {
 
 // Global debounce map to prevent concurrent error spamming (Phase 8 preparation)
 const debounceMap = new Map<string, NodeJS.Timeout>();
+
+export const inlineCoachController = vscode.comments.createCommentController('zeroMagic.fixCoach', '💡 FIX COACH');
+
+export let activeCoach: { thread: vscode.CommentThread, mission: Mission, hintIndex: number } | null = null;
 
 export function activateWatcher(context: vscode.ExtensionContext) {
     console.log('Zero-Magic: Watcher Module Activated.');
@@ -59,12 +66,7 @@ export function activateWatcher(context: vscode.ExtensionContext) {
 
             if (matchedMission) {
                 if (matchedMission.tier === 1) {
-                    const hint = matchedMission.hints && matchedMission.hints.length > 0 ? matchedMission.hints[0] : matchedMission.description;
-                    vscode.window.showInformationMessage(`💡 Hint: ${hint}`, "Tell me more").then(async selection => {
-                        if (selection === "Tell me more") {
-                            await executeMissionHandOff(matchedMission!);
-                        }
-                    });
+                    await showTier1Popup(matchedMission, 0);
                 } else {
                     await executeMissionHandOff(matchedMission);
                 }
@@ -78,56 +80,135 @@ export function activateWatcher(context: vscode.ExtensionContext) {
     const analyzeWholeFileHandler = vscode.commands.registerCommand(
         'zeroMagic.analyzeWholeFile',
         async () => {
-            if (isMissionLoading) {
-                console.log('Zero-Magic: Ignored duplicate mission request.');
-                return;
-            }
-
             const editor = vscode.window.activeTextEditor;
             if (!editor) {
                 vscode.window.showInformationMessage("No active editor found to analyze.");
                 return;
             }
-
-            isMissionLoading = true;
-            let matchedMission: Mission | null = null;
-            try {
-                matchedMission = await vscode.window.withProgress({
-                    location: vscode.ProgressLocation.Notification,
-                    title: "Zero-Magic Engine",
-                    cancellable: false
-                }, async (progress) => {
-                    progress.report({ message: "Analyzing full file context..." });
-                    
-                    const document = editor.document;
-                    const fullCode = document.getText();
-                    const languageId = document.languageId;
-                    const filePath = document.uri.fsPath;
-
-                    return await matchWholeFileToMission(fullCode, languageId, filePath);
-                });
-            } finally {
-                isMissionLoading = false;
-            }
-
-            if (matchedMission) {
-                if (matchedMission.tier === 1) {
-                    const hint = matchedMission.hints && matchedMission.hints.length > 0 ? matchedMission.hints[0] : matchedMission.description;
-                    vscode.window.showInformationMessage(`💡 Hint: ${hint}`, "Tell me more").then(async selection => {
-                        if (selection === "Tell me more") {
-                            await executeMissionHandOff(matchedMission!);
-                        }
-                    });
-                } else {
-                    await executeMissionHandOff(matchedMission);
-                }
-            } else {
-                vscode.window.showInformationMessage("Failed to analyze file. Please check your backend connection.");
-            }
+            
+            // Start the Bug Queue via bugQueue manager
+            await startBugQueue(editor);
         }
     );
 
-    context.subscriptions.push(diagnosticListener, codeActionProvider, commandHandler, analyzeWholeFileHandler);
+    // 5. Register Inline Coach Commands
+    const cmdHint = vscode.commands.registerCommand('zeroMagic.inlineCoach.hint', () => {
+        if (activeCoach) {
+            const maxHints = Math.min(activeCoach.mission.hints?.length || 0, 3);
+            if (activeCoach.hintIndex < maxHints) {
+                activeCoach.hintIndex++;
+                updateCoachComment();
+            }
+        }
+    });
+
+    const cmdClose = vscode.commands.registerCommand('zeroMagic.inlineCoach.close', () => {
+        if (activeCoach) {
+            activeCoach.thread.dispose();
+            activeCoach = null;
+        }
+    });
+
+    const cmdDashboard = vscode.commands.registerCommand('zeroMagic.inlineCoach.dashboard', async () => {
+        if (activeCoach) {
+            const mission = activeCoach.mission;
+            activeCoach.thread.dispose();
+            activeCoach = null;
+            await executeMissionHandOff(mission);
+        }
+    });
+
+    const cmdSubmit = vscode.commands.registerCommand('zeroMagic.inlineCoach.submit', async () => {
+        if (!activeCoach) return;
+        const mission = activeCoach.mission;
+        const targetUri = vscode.Uri.parse(mission.targetUri);
+        const diagnostics = vscode.languages.getDiagnostics(targetUri);
+        
+        const originalErrorResolved = !diagnostics.some(d => d.message === mission.originalMessage);
+
+        if (originalErrorResolved) {
+            await awardXP(globalContext, 'Tier 1 Fix', 50);
+            vscode.window.showInformationMessage("Great job! Error resolved. +50 XP");
+            const usedHints = activeCoach.hintIndex;
+            activeCoach.thread.dispose();
+            activeCoach = null;
+
+            // Advance the bug queue if active
+            if (getQueueState().isActive) {
+                await advanceBugQueue(50, usedHints);
+            }
+        } else {
+            console.log(`[AUDIT] inline submit failed: escalating to dashboard`);
+            activeCoach.thread.dispose();
+            activeCoach = null;
+            await executeMissionHandOff(mission);
+        }
+    });
+
+    context.subscriptions.push(diagnosticListener, codeActionProvider, commandHandler, analyzeWholeFileHandler, inlineCoachController, cmdHint, cmdClose, cmdDashboard, cmdSubmit);
+}
+
+export async function showTier1Popup(mission: Mission, hintIndex: number = 0) {
+    if (hintIndex === 0) {
+        console.log(`[AUDIT] inline coach creation: message=${mission.originalMessage}, code=${mission.originalErrorCode}, line=${mission.errorLineNumber}`);
+    }
+
+    if (activeCoach) {
+        activeCoach.thread.dispose();
+        activeCoach = null;
+    }
+
+    const targetUri = vscode.Uri.parse(mission.targetUri);
+    const line = Math.max(0, (mission.errorLineNumber ?? 1) - 1);
+    const range = new vscode.Range(line, 0, line, 0);
+
+    const thread = inlineCoachController.createCommentThread(targetUri, range, []);
+    thread.canReply = false;
+    thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
+
+    activeCoach = { thread, mission, hintIndex };
+    updateCoachComment();
+}
+
+function updateCoachComment() {
+    if (!activeCoach) return;
+    const { thread, mission, hintIndex } = activeCoach;
+    
+    const question = mission.socraticQuestion || mission.description;
+    const hints = mission.hints || [];
+    const maxHints = Math.min(hints.length, 3);
+
+    let md = new vscode.MarkdownString();
+    md.isTrusted = true;
+    
+    md.appendMarkdown(`**🤔 Question:** ${question}\n\n`);
+    
+    if (hintIndex > 0) {
+        for (let i = 0; i < hintIndex; i++) {
+            md.appendMarkdown(`**💡 Hint ${i + 1}:** ${hints[i]}\n\n`);
+        }
+    } else {
+        md.appendMarkdown(`*Inspect the line carefully. Click 💡 for a hint or Submit when fixed.*\n\n`);
+    }
+
+    md.appendMarkdown(`---\n\n`);
+    
+    const hintBtn = hintIndex < maxHints ? `[💡 (${hintIndex}/3)](command:zeroMagic.inlineCoach.hint)` : `[💡 (3/3)](#)`;
+    md.appendMarkdown(`${hintBtn} \\| [Submit](command:zeroMagic.inlineCoach.submit) \\| [Open Dashboard](command:zeroMagic.inlineCoach.dashboard) \\| [Close](command:zeroMagic.inlineCoach.close)`);
+
+    let authorName = '💡 FIX COACH';
+    const qState = getQueueState();
+    if (qState.isActive) {
+        authorName = `💡 FIX COACH (Bug ${qState.currentIndex + 1} of ${qState.bugs.length})`;
+    }
+
+    const comment: vscode.Comment = {
+        author: { name: authorName },
+        body: md,
+        mode: vscode.CommentMode.Preview
+    };
+
+    thread.comments = [comment];
 }
 
 // --- Internal Logic ---

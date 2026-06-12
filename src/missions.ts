@@ -72,6 +72,8 @@ export interface Mission {
     errorLineNumber?: number;
     /** Tier 2 Multi-Error Regions */
     errorRegions?: { lineStart: number; lineEnd: number; meaning: string; formattedRange?: string }[];
+    /** Validation mode for completion */
+    validationMode?: 'diagnostic' | 'logic';
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -192,6 +194,31 @@ export async function matchErrorToMission(event: DiagnosticEvent): Promise<Missi
     // terminalOutput from the rolling buffer, exitCode from shell integration.
     const ctx = await ContextBuilder.instance.build(event);
 
+    // ── 1. Tier classification (blocking now, required to fix context selection) ──
+    let tier: 1 | 2 | 3 = 2; // safe default
+    try {
+        const tierResp = await fetch(TIER_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                language: ctx.language,
+                errorCode: ctx.errorCode,
+                message: ctx.diagnosticMessage,
+                lineNumber: event.lineNumber,
+                sourceCode: ctx.sourceCode,
+                terminalOutput: ctx.terminalOutput,
+            }),
+        });
+        if (tierResp.ok) {
+            const tierData = await tierResp.json() as { tier: number };
+            tier = tierData.tier as 1 | 2 | 3;
+            LOG.appendLine(`[matchErrorToMission] Tier classified before generation: ${tier}`);
+        }
+    } catch (e) {
+        LOG.appendLine(`[matchErrorToMission] Tier classification failed: ${e}`);
+    }
+
+    // ── 2. Build Mission Generation Request ──
     const requestBody: MissionRequest = {
         language:          ctx.language,
         errorCode:         ctx.errorCode,
@@ -201,6 +228,16 @@ export async function matchErrorToMission(event: DiagnosticEvent): Promise<Missi
         terminalOutput:    ctx.terminalOutput,
         exitCode:          ctx.exitCode,
     };
+
+    // FIX: Restrict Tier-1 context to Active Diagnostic Only
+    if (tier === 1) {
+        requestBody.terminalOutput = '';
+        requestBody.exitCode = -1;
+        // Inject line number so the LLM focuses on the exact error line
+        requestBody.message = `[Line ${event.lineNumber + 1}] ${requestBody.message}`;
+        requestBody.diagnosticMessage = requestBody.message;
+        LOG.appendLine(`[matchErrorToMission] Tier 1 context restricted to line ${event.lineNumber + 1}`);
+    }
 
     LOG.appendLine(`[matchErrorToMission] POST ${BACKEND_URL}`);
     LOG.appendLine(`  → language       : ${requestBody.language}`);
@@ -212,7 +249,7 @@ export async function matchErrorToMission(event: DiagnosticEvent): Promise<Missi
         LOG.appendLine(`  → [RUNTIME] Terminal output present — backend will prioritize over diagnostics`);
     }
 
-    // ── Fetch with timeout ────────────────────────────────────────────────────
+    // ── 3. Fetch with timeout ────────────────────────────────────────────────────
     let response: Response;
     try {
         const controller = new AbortController();
@@ -270,33 +307,14 @@ export async function matchErrorToMission(event: DiagnosticEvent): Promise<Missi
 
     // ── Map and return ────────────────────────────────────────────────────────
     const mission = mapResponseToMission(validated, ctx, ctx.errorCode, event.lineNumber + 1);
-    LOG.appendLine(`[matchErrorToMission] ✓ Mission matched: id="${mission.id}" title="${mission.title}"`);
+    mission.tier = tier; // <-- Set the tier we classified earlier
+
+    const diagnosticErrors = ['SyntaxError', 'NameError', 'ImportError', 'IndentationError', 'TypeError', 'ParseError'];
+    mission.validationMode = diagnosticErrors.some(e => ctx.errorCode.includes(e) || ctx.diagnosticMessage.includes(e)) ? 'diagnostic' : 'logic';
+
+    LOG.appendLine(`[matchErrorToMission] ✓ Mission matched: id="${mission.id}" title="${mission.title}" mode="${mission.validationMode}"`);
     if (mission.runtimeSummary?.hasRuntimeData) {
         LOG.appendLine(`[matchErrorToMission] ✓ Runtime context included: exitCode=${mission.runtimeSummary.exitCode}`);
-    }
-
-    // ── Tier classification (non-blocking) ────────────────────────────────────────
-    try {
-        const tierResp = await fetch(TIER_URL, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                language: ctx.language,
-                errorCode: ctx.errorCode,
-                message: ctx.diagnosticMessage,
-                lineNumber: event.lineNumber,
-                sourceCode: ctx.sourceCode,
-                terminalOutput: ctx.terminalOutput,
-            }),
-        });
-        if (tierResp.ok) {
-            const tierData = await tierResp.json() as { tier: number };
-            mission.tier = tierData.tier as 1 | 2 | 3;
-            LOG.appendLine(`[matchErrorToMission] Tier classified: ${mission.tier}`);
-        }
-    } catch (e) {
-        LOG.appendLine(`[matchErrorToMission] Tier classification failed (non-fatal): ${e}`);
-        mission.tier = 2; // safe default
     }
 
     // ── Tier 2 Multi-Region Analysis ──────────────────────────────────────────
@@ -342,6 +360,7 @@ export async function matchErrorToMission(event: DiagnosticEvent): Promise<Missi
  */
 export async function executeMissionHandOff(mission: Mission) {
     try {
+        console.log(`[AUDIT] redirect logic (executeMissionHandOff): message=${mission.originalMessage}, code=${mission.originalErrorCode}, line=${mission.errorLineNumber}`);
         LOG.appendLine(`[executeMissionHandOff] === HAND-OFF ===`);
         LOG.appendLine(`  Mission : ${mission.title} (${mission.id})`);
         LOG.appendLine(`  Target  : ${mission.targetFilename}`);
@@ -351,44 +370,45 @@ export async function executeMissionHandOff(mission: Mission) {
         // Tier 1 = Syntax/Typo errors → skip the ritual, go straight to mission card.
         // Tier 2/3 = Logic / Runtime   → run the 3-step read ritual first.
         const tier = mission.tier ?? 2;
-        const needsRitual = tier >= 2;
 
-        if (needsRitual) {
-            // Initialize the ritual state machine (no-op if already started)
-            const ritual = initRitual(globalContext, mission.id);
+        // Compute diagnostic hash to prevent stale explanations from previous errors
+        const diagnosticHash = `${mission.originalErrorCode}:${mission.errorLineNumber}:${mission.originalMessage}`;
 
-            // Fetch a plain-English error summary + suspect lines from the backend
-            // so Steps 1 & 2 of the ritual have real, contextual content.
-            if (!ritual.errorSummary) {
-                try {
-                    const rc = await fetch(RITUAL_CONTEXT_URL, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            language: mission.language,
-                            errorCode: mission.originalErrorCode,
-                            message: mission.originalMessage,
-                            lineNumber: mission.errorLineNumber ?? 0,
-                            sourceCode: '',   // sidebar will be shown; keep payload small
-                            terminalOutput: mission.runtimeSummary?.lastTerminalError ?? '',
-                        }),
-                    });
-                    if (rc.ok) {
-                        const data = await rc.json() as { errorSummary: string; errorLines: { line: number; text: string }[] };
-                        // Persist the summary + lines into the ritual state
-                        const rituals = globalContext.workspaceState.get<any>('zeroMagic.rituals') || {};
-                        rituals[mission.id] = {
-                            ...rituals[mission.id],
-                            errorSummary: data.errorSummary,
-                            errorLines: data.errorLines,
-                            tier,
-                        };
-                        await globalContext.workspaceState.update('zeroMagic.rituals', rituals);
-                        LOG.appendLine(`[executeMissionHandOff] Ritual context fetched OK`);
-                    }
-                } catch (e) {
-                    LOG.appendLine(`[executeMissionHandOff] Ritual context fetch failed (non-fatal): ${e}`);
+        // Initialize the ritual state machine (no-op if already started and hash matches)
+        const ritual = initRitual(globalContext, mission.id, diagnosticHash);
+
+        // Fetch a plain-English error summary + suspect lines from the backend
+        // so Steps 1 & 2 of the ritual have real, contextual content.
+        // We always fetch this so the dashboard has the explanation, even if we skip ritual steps.
+        if (!ritual.errorSummary) {
+            try {
+                const rc = await fetch(RITUAL_CONTEXT_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        language: mission.language,
+                        errorCode: mission.originalErrorCode,
+                        message: mission.originalMessage,
+                        lineNumber: mission.errorLineNumber ?? 0,
+                        sourceCode: '',   // sidebar will be shown; keep payload small
+                        terminalOutput: mission.runtimeSummary?.lastTerminalError ?? '',
+                    }),
+                });
+                if (rc.ok) {
+                    const data = await rc.json() as { errorSummary: string; errorLines: { line: number; text: string }[] };
+                    // Persist the summary + lines into the ritual state
+                    const rituals = globalContext.workspaceState.get<any>('zeroMagic.rituals') || {};
+                    rituals[mission.id] = {
+                        ...rituals[mission.id],
+                        errorSummary: data.errorSummary,
+                        errorLines: data.errorLines,
+                        tier,
+                    };
+                    await globalContext.workspaceState.update('zeroMagic.rituals', rituals);
+                    LOG.appendLine(`[executeMissionHandOff] Ritual context fetched OK`);
                 }
+            } catch (e) {
+                LOG.appendLine(`[executeMissionHandOff] Ritual context fetch failed (non-fatal): ${e}`);
             }
         }
 

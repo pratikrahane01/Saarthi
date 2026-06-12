@@ -5,11 +5,13 @@ import * as path from 'path';
 import { getRitualState, advanceStep, skipRitual, DebugRitualState } from '../debugTrainer';
 import { globalContext } from '../extension';
 
+import { getQueueState, advanceBugQueue } from '../bugQueue';
+
 /**
  * The seven possible UI states for the Socratic Dashboard.
  * Each state maps to a distinct visual presentation in the webview.
  */
-export type DashboardState = 'IDLE' | 'RITUAL' | 'QUESTIONING' | 'HINTING' | 'TESTING' | 'PASSED' | 'FAILED' | 'SOLUTION';
+export type DashboardState = 'IDLE' | 'RITUAL' | 'QUESTIONING' | 'HINTING' | 'TESTING' | 'PASSED' | 'FAILED' | 'SOLUTION' | 'MISSION_COMPLETE';
 
 export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
 
@@ -30,6 +32,7 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
         explanation: string;
         conceptSummary: string;
     };
+    private _missionCompletePayload?: any;
     private _canSkipRitual: boolean = false;
     private _ritualState: DebugRitualState | null = null;
 
@@ -107,6 +110,17 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
         this._postState();
 
         // Make sure the sidebar is visible
+        if (this._view) {
+            this._view.show?.(true);
+        }
+    }
+
+    public showMissionComplete(payload: any) {
+        this._currentState = 'MISSION_COMPLETE';
+        this._currentPage = 4;
+        this._currentMission = undefined;
+        this._missionCompletePayload = payload;
+        this._postState();
         if (this._view) {
             this._view.show?.(true);
         }
@@ -540,7 +554,6 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
         this._isTesting = true;
         this._currentState = 'TESTING';
         this._postState();
-
         const mission = this._currentMission;
         console.log(`Zero-Magic Sidebar: Re-running test for mission "${mission.id}"`);
         console.log("[ZERO-MAGIC] Test execution started");
@@ -556,32 +569,48 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             }
 
             // --- Two-Factor Validation ---
-            let finalPassed = result.passed;
+            let finalPassed = false;
             let twoFactorFailedMessage: string | undefined;
 
+            const mode = mission.validationMode || 'logic';
             const checkUri = mission.targetUri ? vscode.Uri.parse(mission.targetUri) : undefined;
-            if (result.passed && checkUri) {
-                const diagnostics = vscode.languages.getDiagnostics(checkUri);
 
-                const hasOriginalError = diagnostics.some(d =>
-                    d.severity === vscode.DiagnosticSeverity.Error &&
-                    (d.message === mission.originalMessage || d.message.includes(mission.originalErrorCode))
-                );
+            if (mode === 'diagnostic') {
+                if (checkUri) {
+                    const diagnostics = vscode.languages.getDiagnostics(checkUri);
+                    const hasOriginalError = diagnostics.some(d =>
+                        d.severity === vscode.DiagnosticSeverity.Error &&
+                        (d.message === mission.originalMessage || d.message.includes(mission.originalErrorCode))
+                    );
 
-                if (hasOriginalError) {
-                    finalPassed = false;
-                    twoFactorFailedMessage = "The concept test passed, but your original error is still present. Apply the concept to your code.";
-                    console.log(`Zero-Magic Sidebar: Two-factor failed. Original error still present.`);
+                    finalPassed = !hasOriginalError;
+                    if (!finalPassed) {
+                        twoFactorFailedMessage = "The original error is still present. Please fix it in your code before submitting.";
+                    }
+                } else {
+                    finalPassed = result.passed; // Fallback
+                }
+            } else {
+                finalPassed = result.passed;
+                if (!finalPassed) {
+                    twoFactorFailedMessage = "The concept check test failed. Please review your logic.";
                 }
             }
 
             if (finalPassed) {
-                this._currentPage = 3;
-                this._currentState = 'PASSED';
                 this._customFailedMessage = undefined;
                 await this._saveStepHistory(true);
                 await interceptor.unlockMission(mission.id, mission.language);
-                this._postState();
+
+                const qState = getQueueState();
+                if (qState.isActive) {
+                    await advanceBugQueue(100, this._hintsUsed);
+                    return; // Stop here, bugQueue will take over
+                } else {
+                    this._currentPage = 3;
+                    this._currentState = 'PASSED';
+                    this._postState();
+                }
             } else {
                 this._hearts--;
                 this._hasFailedSubmit = true;
@@ -671,6 +700,28 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             runtimeSummary: this._currentMission?.runtimeSummary ?? null,
             canSkipRitual: this._canSkipRitual,
             ritualState: this._ritualState,
+            missionCompletePayload: this._missionCompletePayload,
+            analysisMode: (() => {
+                try {
+                    return getQueueState().isActive ? 'full-file' : 'single';
+                } catch (e) {
+                    return 'single';
+                }
+            })(),
+            queueState: (() => {
+                try {
+                    const qState = getQueueState();
+                    if (qState.isActive && qState.bugs.length > 0) {
+                        return {
+                            currentIndex: qState.initialTotalBugs - qState.bugs.length,
+                            total: qState.initialTotalBugs,
+                            currentLine: qState.bugs[0].lineNumber + 1,
+                            currentErrorType: qState.bugs[0].errorMessage.split(':')[0]
+                        };
+                    }
+                } catch (e) {}
+                return null;
+            })()
         });
     }
 
@@ -1666,6 +1717,18 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
         <!-- content area -->
         <div class="content">
 
+            <!-- Bug Queue Progress Panel (Hidden by default) -->
+            <div id="queue-progress-panel" style="display: none; background: rgba(167, 139, 250, 0.1); border: 1px dashed rgba(167, 139, 250, 0.4); border-radius: 8px; padding: 12px; margin-bottom: -10px;">
+                <div class="section-header" style="color: #a78bfa; margin-bottom: 8px;">MISSION PROGRESS</div>
+                <div style="display: flex; justify-content: space-between; font-family: 'DM Mono', monospace; font-size: 0.85rem; color: #e6edf3;">
+                    <span id="queue-bug-count">Bug 1/4</span>
+                    <span id="queue-current-target" style="color: #a78bfa;">Current Target: Line X</span>
+                </div>
+                <div style="font-family: 'DM Mono', monospace; font-size: 0.8rem; color: #e6edf3; margin-top: 4px; opacity: 0.8;">
+                    Error Type: <span id="queue-error-type" style="color: #ff5f56;">NameError</span>
+                </div>
+            </div>
+
             <!-- MAIN PANEL -->
             <div class="main-panel" id="main-panel">
                 <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px dashed rgba(166, 172, 205, 0.15); padding-bottom: 8px; margin-bottom: 4px;">
@@ -1912,7 +1975,7 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
 
             <!-- Page Indicator at the bottom -->
             <div class="page-footer" style="display: flex; flex-direction: column; align-items: center; gap: 8px; margin-top: auto; font-size: 0.8rem; color: rgba(166, 172, 205, 0.5); border-top: 1px dashed rgba(166, 172, 205, 0.1); padding-top: 12px; padding-bottom: 8px;">
-                <div>
+                <div id="page-indicator" style="display: none;">
                     Page <span id="page-display" style="color: #c5cdd8; font-weight: 500;">1 of 3</span>
                 </div>
                 <!-- Theme Switcher Option -->
@@ -2286,10 +2349,54 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                 const pageFooter = document.querySelector('.page-footer');
                 const page1Layout = document.getElementById('page-1-layout');
                 const questionText = document.getElementById('question-text');
+                const queueProgressPanel = document.getElementById('queue-progress-panel');
+
+                if (state === 'MISSION_COMPLETE') {
+                    if (mainPanel) mainPanel.style.display = 'none';
+                    if (actionsPanel) actionsPanel.style.display = 'none';
+                    if (pageFooter) pageFooter.style.display = 'none';
+                    if (queueProgressPanel) queueProgressPanel.style.display = 'none';
+
+                    let mcPanel = document.getElementById('mission-complete-panel');
+                    if (!mcPanel) {
+                        mcPanel = document.createElement('div');
+                        mcPanel.id = 'mission-complete-panel';
+                        mcPanel.className = 'main-panel';
+                        document.querySelector('.content').appendChild(mcPanel);
+                    }
+                    
+                    const p = message.missionCompletePayload || {};
+                    mcPanel.innerHTML = \`
+                        <div style="text-align: center; margin-top: 20px;">
+                            <div style="font-size: 3rem; margin-bottom: 10px;">🏆</div>
+                            <h2 style="color: #a78bfa; margin-bottom: 20px;">MISSION COMPLETE</h2>
+                            <div style="background: rgba(0,0,0,0.2); padding: 16px; border-radius: 8px; text-align: left; margin: 0 auto; max-width: 250px;">
+                                <p style="margin: 8px 0; color: #e6edf3;"><strong>Total Bugs Solved:</strong> <span style="float: right; color: #a78bfa;">\${p.totalBugs || 0}</span></p>
+                                <p style="margin: 8px 0; color: #e6edf3;"><strong>Hints Used:</strong> <span style="float: right; color: #ff9800;">\${p.hintsUsed || 0}</span></p>
+                                <p style="margin: 8px 0; color: #e6edf3;"><strong>Total XP Earned:</strong> <span style="float: right; color: #27c93f;">+\${p.totalXP || 0}</span></p>
+                            </div>
+                            <button class="btn btn-solid" onclick="vscode.postMessage({type: 'RESET'})" style="margin-top: 30px; width: 200px;">Return to Editor</button>
+                        </div>
+                    \`;
+                    mcPanel.style.display = 'block';
+                    return;
+                } else {
+                    let mcPanel = document.getElementById('mission-complete-panel');
+                    if (mcPanel) mcPanel.style.display = 'none';
+                }
 
                 if (mainPanel) mainPanel.style.display = 'flex';
                 if (actionsPanel) actionsPanel.style.display = 'flex';
                 if (pageFooter) pageFooter.style.display = 'flex';
+
+                if (message.analysisMode === 'full-file' && message.queueState && queueProgressPanel) {
+                    queueProgressPanel.style.display = 'block';
+                    document.getElementById('queue-bug-count').textContent = \`Bug \${message.queueState.currentIndex + 1}/\${message.queueState.total}\`;
+                    document.getElementById('queue-current-target').textContent = \`Current Target: Line \${message.queueState.currentLine}\`;
+                    document.getElementById('queue-error-type').textContent = message.queueState.currentErrorType;
+                } else if (queueProgressPanel) {
+                    queueProgressPanel.style.display = 'none';
+                }
 
                 // Populate hint modal data from all hints
                 if (mission && mission.allHints && mission.allHints.length > 0) {
@@ -2310,72 +2417,54 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
 
                     // Lines card is now interactive input, so we don't populate error lines block.
 
-                    if (canSkipRitual) {
-                        ritualSkipContainer.style.display = 'block';
+                    // ── PHASE 3 — HIDE LEGACY COMPONENTS ──
+                    if (ritualSkipContainer) ritualSkipContainer.style.display = 'none';
+
+                    const locationCard = document.getElementById('location-card');
+                    if (locationCard) locationCard.style.display = 'none';
+
+                    const hypothesisSection = document.getElementById('hypothesis-section');
+                    if (hypothesisSection) hypothesisSection.style.display = 'none';
+
+                    // ── PHASE 2 — FORCE SINGLE DASHBOARD LAYOUT ──
+                    // Show the error line navigator with the current line number
+                    const errorLineNavigator = document.getElementById('error-line-navigator');
+                    const errorLineDisplay = document.getElementById('error-line-display');
+                    if (errorLineNavigator) errorLineNavigator.style.display = 'flex';
+                    
+                    if (mission && mission.errorRegions && mission.errorRegions.length > 0) {
+                        currentErrorRegions = mission.errorRegions;
+                        // Only reset hypothesis arrays if it's a completely new set of regions
+                        if (regionHypotheses.length !== mission.errorRegions.length) {
+                            regionHypotheses = new Array(mission.errorRegions.length).fill('');
+                        }
+                        currentRegionIndex = 0;
+                        renderCurrentRegion();
                     } else {
-                        ritualSkipContainer.style.display = 'none';
+                        currentErrorRegions = [];
+                        if (errorLineDisplay && mission && mission.errorLineNumber) {
+                            errorLineDisplay.textContent = '#L' + String(mission.errorLineNumber);
+                        }
                     }
 
-                    // Tier 2 specific UI toggle
-                    const isTier2 = mission && mission.tier === 2;
-                    if (isTier2) {
-                        const locationCard = document.getElementById('location-card');
-                        if (locationCard) locationCard.style.display = 'none';
-
-                        const hypothesisSection = document.getElementById('hypothesis-section');
-                        if (hypothesisSection) hypothesisSection.style.display = 'none';
-
-                        // Show the error line navigator with the current line number
-                        const errorLineNavigator = document.getElementById('error-line-navigator');
-                        const errorLineDisplay = document.getElementById('error-line-display');
-                        if (errorLineNavigator) errorLineNavigator.style.display = 'flex';
-                        
-                        if (mission.errorRegions && mission.errorRegions.length > 0) {
-                            currentErrorRegions = mission.errorRegions;
-                            // Only reset hypothesis arrays if it's a completely new set of regions
-                            if (regionHypotheses.length !== mission.errorRegions.length) {
-                                regionHypotheses = new Array(mission.errorRegions.length).fill('');
-                            }
-                            currentRegionIndex = 0;
-                            renderCurrentRegion();
-                        } else {
-                            currentErrorRegions = [];
-                            if (errorLineDisplay && mission.errorLineNumber) {
-                                errorLineDisplay.textContent = '#L' + String(mission.errorLineNumber);
-                            }
-                        }
-
-                        const t2Hyp = document.getElementById('tier2-hypothesis-section');
-                        const t2Exp = document.getElementById('tier2-explanation-section');
-                        
-                        if (hearts === 3) {
-                            t2Hyp.style.display = 'block';
-                            t2Exp.style.display = 'none';
-                        } else {
-                            t2Hyp.style.display = 'none';
-                            t2Exp.style.display = 'block';
-                            
-                            const expText = document.getElementById('tier2-explanation-text');
-                            if (hearts === 2) {
-                                expText.innerHTML = (mission.hints && mission.hints.length > 0) ? escapeHtml(mission.hints[0]) : 'Look closely at your logic and references.';
-                            } else if (hearts === 1) {
-                                expText.innerHTML = (mission.hints && mission.hints.length > 1) ? escapeHtml(mission.hints[1]) : 'Are you calling the function or assigning the variable correctly?';
-                            }
-                        }
-                    } else {
-                        // Restore Tier 3 state
-                        const locationCard = document.getElementById('location-card');
-                        if (locationCard) locationCard.style.display = 'block';
-                        const hypothesisSection = document.getElementById('hypothesis-section');
-                        if (hypothesisSection) hypothesisSection.style.display = 'block';
-                        
-                        const errorLineNavigator = document.getElementById('error-line-navigator');
-                        if (errorLineNavigator) errorLineNavigator.style.display = 'none';
-                        
-                        const t2Hyp = document.getElementById('tier2-hypothesis-section');
-                        if (t2Hyp) t2Hyp.style.display = 'none';
-                        const t2Exp = document.getElementById('tier2-explanation-section');
+                    const t2Hyp = document.getElementById('tier2-hypothesis-section');
+                    const t2Exp = document.getElementById('tier2-explanation-section');
+                    
+                    if (hearts === 3) {
+                        if (t2Hyp) t2Hyp.style.display = 'block';
                         if (t2Exp) t2Exp.style.display = 'none';
+                    } else {
+                        if (t2Hyp) t2Hyp.style.display = 'none';
+                        if (t2Exp) t2Exp.style.display = 'block';
+                        
+                        const expText = document.getElementById('tier2-explanation-text');
+                        if (expText) {
+                            if (hearts === 2) {
+                                expText.innerHTML = (mission && mission.hints && mission.hints.length > 0) ? escapeHtml(mission.hints[0]) : 'Look closely at your logic and references.';
+                            } else if (hearts === 1) {
+                                expText.innerHTML = (mission && mission.hints && mission.hints.length > 1) ? escapeHtml(mission.hints[1]) : 'Are you calling the function or assigning the variable correctly?';
+                            }
+                        }
                     }
                 } else {
                     page1Layout.style.display = 'none';
