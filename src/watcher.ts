@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { matchErrorToMission, executeMissionHandOff } from './missions';
+import { matchErrorToMission, executeMissionHandOff, matchWholeFileToMission, Mission } from './missions';
 
 // Define the strict contract we agreed upon for Teammate 2
 export interface DiagnosticEvent {
@@ -40,9 +40,10 @@ export function activateWatcher(context: vscode.ExtensionContext) {
             }
 
             isMissionLoading = true;
+            let matchedMission: Mission | null = null;
             try {
                 // Show immediate visual confirmation to the user
-                await vscode.window.withProgress({
+                matchedMission = await vscode.window.withProgress({
                     location: vscode.ProgressLocation.Notification,
                     title: "Zero-Magic Engine",
                     cancellable: false
@@ -50,22 +51,83 @@ export function activateWatcher(context: vscode.ExtensionContext) {
                     progress.report({ message: "Analyzing error context..." });
                     
                     // Invoke your Phase 2 matching module
-                    const matchedMission = await matchErrorToMission(event);
-                    
-                    if (matchedMission) {
-                        progress.report({ message: "Socratic Mission Found! Handing off..." });
-                        await executeMissionHandOff(matchedMission);
-                    } else {
-                        vscode.window.showInformationMessage("No guided lesson available for this specific error. Keep debugging!");
-                    }
+                    return await matchErrorToMission(event);
                 });
             } finally {
                 isMissionLoading = false;
             }
+
+            if (matchedMission) {
+                if (matchedMission.tier === 1) {
+                    const hint = matchedMission.hints && matchedMission.hints.length > 0 ? matchedMission.hints[0] : matchedMission.description;
+                    vscode.window.showInformationMessage(`💡 Hint: ${hint}`, "Tell me more").then(async selection => {
+                        if (selection === "Tell me more") {
+                            await executeMissionHandOff(matchedMission!);
+                        }
+                    });
+                } else {
+                    await executeMissionHandOff(matchedMission);
+                }
+            } else {
+                vscode.window.showInformationMessage("No guided lesson available for this specific error. Keep debugging!");
+            }
         }
     );
 
-    context.subscriptions.push(diagnosticListener, codeActionProvider, commandHandler);
+    // 4. The Whole File Analysis Hook: What happens when the user presses Ctrl+Alt+Z
+    const analyzeWholeFileHandler = vscode.commands.registerCommand(
+        'zeroMagic.analyzeWholeFile',
+        async () => {
+            if (isMissionLoading) {
+                console.log('Zero-Magic: Ignored duplicate mission request.');
+                return;
+            }
+
+            const editor = vscode.window.activeTextEditor;
+            if (!editor) {
+                vscode.window.showInformationMessage("No active editor found to analyze.");
+                return;
+            }
+
+            isMissionLoading = true;
+            let matchedMission: Mission | null = null;
+            try {
+                matchedMission = await vscode.window.withProgress({
+                    location: vscode.ProgressLocation.Notification,
+                    title: "Zero-Magic Engine",
+                    cancellable: false
+                }, async (progress) => {
+                    progress.report({ message: "Analyzing full file context..." });
+                    
+                    const document = editor.document;
+                    const fullCode = document.getText();
+                    const languageId = document.languageId;
+                    const filePath = document.uri.fsPath;
+
+                    return await matchWholeFileToMission(fullCode, languageId, filePath);
+                });
+            } finally {
+                isMissionLoading = false;
+            }
+
+            if (matchedMission) {
+                if (matchedMission.tier === 1) {
+                    const hint = matchedMission.hints && matchedMission.hints.length > 0 ? matchedMission.hints[0] : matchedMission.description;
+                    vscode.window.showInformationMessage(`💡 Hint: ${hint}`, "Tell me more").then(async selection => {
+                        if (selection === "Tell me more") {
+                            await executeMissionHandOff(matchedMission!);
+                        }
+                    });
+                } else {
+                    await executeMissionHandOff(matchedMission);
+                }
+            } else {
+                vscode.window.showInformationMessage("Failed to analyze file. Please check your backend connection.");
+            }
+        }
+    );
+
+    context.subscriptions.push(diagnosticListener, codeActionProvider, commandHandler, analyzeWholeFileHandler);
 }
 
 // --- Internal Logic ---

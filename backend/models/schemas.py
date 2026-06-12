@@ -273,3 +273,231 @@ class SolutionResponse(BaseModel):
     fixedCode: str = Field(...)
     explanation: str = Field(...)
     conceptSummary: str = Field(...)
+
+# ---------------------------------------------------------------------------
+# File Analysis Request Model
+# ---------------------------------------------------------------------------
+
+class FileAnalysisRequest(BaseModel):
+    language: str = Field(
+        ...,
+        description="The programming language of the full file context.",
+        examples=["python", "javascript", "typescript"],
+    )
+    fullCode: str = Field(
+        ...,
+        description="The complete source code of the file.",
+        examples=["def main():\n    print('hello world')"],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tier Classification Models
+# ---------------------------------------------------------------------------
+
+class TierClassifyRequest(BaseModel):
+    """
+    Payload for POST /v1/missions/classify-tier.
+
+    Sent by the VS Code extension immediately after a diagnostic event is
+    captured. The backend uses GROQ_API_KEY1 (dedicated classifier key) plus
+    a regex fast-path to determine which tier of error assistance to display.
+    """
+
+    language: str = Field(
+        ...,
+        description="Programming language of the file that raised the error.",
+        examples=["python", "javascript"],
+    )
+    errorCode: str = Field(
+        ...,
+        description="Short error-type identifier (e.g. 'TypeError', 'SyntaxError').",
+        examples=["TypeError", "SyntaxError", "NameError"],
+    )
+    message: str = Field(
+        ...,
+        description="Full human-readable error message from the IDE diagnostic.",
+        examples=["name 'x' is not defined"],
+    )
+    terminalOutput: str = Field(
+        default="",
+        description="Combined stdout + stderr from the last terminal run.",
+    )
+    sourceCode: str = Field(
+        default="",
+        description="Complete source of the active file (improves LLM accuracy).",
+    )
+    lineNumber: int = Field(
+        default=0,
+        description="Line number where the error occurred (0 = unknown).",
+        examples=[14, 42, 0],
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "language": "python",
+                "errorCode": "TypeError",
+                "message": "'NoneType' object is not subscriptable",
+                "terminalOutput": "Traceback (most recent call last):\n  File 'app.py', line 14\nTypeError: 'NoneType' object is not subscriptable",
+                "sourceCode": "data = fetch_data()\nprint(data[0])",
+                "lineNumber": 14,
+            }
+        }
+    }
+
+
+class TierClassifyResponse(BaseModel):
+    """
+    Result of tier classification returned to the VS Code extension.
+
+    The extension uses `tier` to decide which sidebar card to render:
+      1 → lightweight TIER1_NUDGE card (no API, instant)
+      2 → TIER2_ANALYSIS card + opt-in [Deep Dive] button
+      3 → auto-trigger DEEP_DIVE mode
+    """
+
+    tier: int = Field(
+        ...,
+        description="Error tier: 1 = Syntax Nudge, 2 = Analysis Card, 3 = Deep Dive.",
+        examples=[1, 2, 3],
+    )
+    errorFlag: str = Field(
+        ...,
+        description="Human-readable one-liner: 'Line N: ErrorCode: message'.",
+        examples=["Line 14: TypeError: 'NoneType' object is not subscriptable"],
+    )
+    proTip: str = Field(
+        default="",
+        description="Curated tip for Tier 1 errors. Empty string for Tier 2/3.",
+        examples=["Tip: Read the caret in the traceback — it points to the rejected character."],
+    )
+    explanation: str = Field(
+        default="",
+        description="One-sentence rationale for the tier assignment (Tier 2/3). Empty for Tier 1.",
+        examples=["TypeError at runtime indicates a semantic type mismatch, not a syntax issue."],
+    )
+    source: str = Field(
+        default="fallback",
+        description="How the tier was determined: 'regex', 'llm', or 'fallback'.",
+        examples=["llm", "regex", "fallback"],
+    )
+    apiUsed: str = Field(
+        default="none",
+        description="Which API was used for classification (e.g., 'groq', 'none').",
+        examples=["groq", "none"],
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "tier": 2,
+                "errorFlag": "Line 14: TypeError: 'NoneType' object is not subscriptable",
+                "proTip": "",
+                "explanation": "TypeError at runtime — data flow issue, not a syntax problem.",
+                "source": "llm",
+                "apiUsed": "groq",
+            }
+        }
+    }
+
+
+# ---------------------------------------------------------------------------
+# Ritual Context Models
+# ---------------------------------------------------------------------------
+
+class ErrorLine(BaseModel):
+    """A single line of source code that is a suspect for the error."""
+    line: int = Field(..., description="1-indexed line number.")
+    text: str = Field(..., description="The text content of that line.")
+
+
+class RitualContextRequest(BaseModel):
+    """Payload for POST /v1/missions/ritual-context."""
+
+    language: str = Field(..., examples=["python"])
+    errorCode: str = Field(..., examples=["TypeError"])
+    message: str = Field(..., examples=["name 'x' is not defined"])
+    lineNumber: int = Field(default=0, examples=[14])
+    sourceCode: str = Field(default="")
+    terminalOutput: str = Field(default="")
+
+
+class RitualContextResponse(BaseModel):
+    """
+    Read-only content shown during the Debug Ritual.
+    Step 1 shows errorSummary; Step 2 shows errorLines.
+    """
+    errorSummary: str = Field(
+        ...,
+        description="Plain-English 2-3 sentence explanation of the error (no code, no fix).",
+    )
+    errorLines: list[ErrorLine] = Field(
+        default_factory=list,
+        description="Source lines near the error that the student should examine.",
+    )
+    fallback: bool = Field(
+        default=False,
+        description="True if the Groq API was unavailable and defaults were used.",
+    )
+
+# ---------------------------------------------------------------------------
+# Evaluate Hypothesis Models
+# ---------------------------------------------------------------------------
+
+class EvaluateHypothesisRequest(BaseModel):
+    """Payload for POST /v1/missions/evaluate-hypothesis."""
+    user_hypothesis: str
+    actual_error: str
+    code_snippet: str
+
+class EvaluateHypothesisResponse(BaseModel):
+    """Result of hypothesis evaluation."""
+    status: str = Field(..., description="PASS, CLOSE, or FAIL")
+    nudge: str = Field(..., description="Socratic nudge or empty string")
+
+
+# ---------------------------------------------------------------------------
+# Analyze Errors (Multi-Region) Models
+# ---------------------------------------------------------------------------
+
+class AnalyzeErrorsRequest(BaseModel):
+    """Payload for POST /v1/missions/analyze-errors.
+
+    The extension sends source code + error context after a Tier 2
+    classification. The backend identifies 2-4 suspect regions in the code.
+    """
+    language: str = Field(..., examples=["python"])
+    errorCode: str = Field(..., examples=["TypeError"])
+    message: str = Field(..., examples=["'NoneType' object is not subscriptable"])
+    sourceCode: str = Field(..., description="Complete source code of the active file.")
+    lineNumber: int = Field(default=0, description="Line where the primary error was reported.")
+    terminalOutput: str = Field(default="", description="Terminal output if available.")
+
+
+class ErrorRegion(BaseModel):
+    """A single suspect region in the source code."""
+    lineStart: int = Field(..., description="1-indexed start line of the suspect region.")
+    lineEnd: int = Field(..., description="1-indexed end line (same as lineStart for single-line).")
+    meaning: str = Field(
+        ...,
+        description="Plain-English 1-2 sentence explanation of what might be wrong here.",
+    )
+    formattedRange: str = Field(
+        ...,
+        description="Line range formatted exactly as ' #L<start> - <end> ' or ' #L<start> '.",
+    )
+
+
+class AnalyzeErrorsResponse(BaseModel):
+    """Response from POST /v1/missions/analyze-errors.
+
+    Contains 2-4 suspect regions the student should investigate.
+    """
+    regions: list[ErrorRegion] = Field(
+        ...,
+        description="Ordered list of suspect code regions with explanations.",
+        min_length=1,
+        max_length=6,
+    )
+

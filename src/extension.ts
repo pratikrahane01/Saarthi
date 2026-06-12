@@ -4,8 +4,12 @@ import { SocraticSidebarProvider } from './ui/sidebar';
 import { Mission } from './missions';
 import { cleanUpAllTests } from './interceptor';
 import { ContextBuilder } from './contextBuilder';
+import { canSkipRitual } from './debugTrainer';
+
+export let globalContext: vscode.ExtensionContext;
 
 export async function activate(context: vscode.ExtensionContext) {
+    globalContext = context;
     console.log('Zero-Magic Deconstruction Agent is now active.');
 
     // Phase 9: Clean up any orphaned test files from previous sessions
@@ -32,9 +36,10 @@ export async function activate(context: vscode.ExtensionContext) {
     // The legacy floating dashboard panel has been retired as primary UI.
     const renderDashboardCmd = vscode.commands.registerCommand(
         'zeroMagic.renderSocraticDashboard',
-        (mission: Mission) => {
+        async (mission: Mission) => {
             if (SocraticSidebarProvider.instance) {
-                SocraticSidebarProvider.instance.showMission(mission);
+                const skipAllowed = await canSkipRitual(globalContext);
+                SocraticSidebarProvider.instance.showMission(mission, skipAllowed);
             }
         }
     );

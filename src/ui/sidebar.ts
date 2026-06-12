@@ -1,13 +1,15 @@
 import * as vscode from 'vscode';
-import { Mission, fetchExpertSolution, SolutionRequest } from '../missions';
+import { Mission, fetchExpertSolution, SolutionRequest, evaluateHypothesisAPI } from '../missions';
 import * as interceptor from '../interceptor';
 import * as path from 'path';
+import { getRitualState, advanceStep, skipRitual, DebugRitualState } from '../debugTrainer';
+import { globalContext } from '../extension';
 
 /**
- * The six possible UI states for the Socratic Dashboard.
+ * The seven possible UI states for the Socratic Dashboard.
  * Each state maps to a distinct visual presentation in the webview.
  */
-export type DashboardState = 'IDLE' | 'QUESTIONING' | 'HINTING' | 'TESTING' | 'PASSED' | 'FAILED' | 'SOLUTION';
+export type DashboardState = 'IDLE' | 'RITUAL' | 'QUESTIONING' | 'HINTING' | 'TESTING' | 'PASSED' | 'FAILED' | 'SOLUTION';
 
 export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
 
@@ -28,6 +30,8 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
         explanation: string;
         conceptSummary: string;
     };
+    private _canSkipRitual: boolean = false;
+    private _ritualState: DebugRitualState | null = null;
 
     // Game state variables matching user specifications
     private _currentPage: number = 1;
@@ -73,11 +77,24 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
     // ──────────────────────────────────────────────
 
     /**
-     * Load a new mission and transition to the QUESTIONING state.
+     * Load a new mission and transition to QUESTIONING or RITUAL state.
+     * For Tier 1 errors (syntax/typo) we skip the ritual entirely.
      */
-    public showMission(mission: Mission) {
+    public showMission(mission: Mission, canSkipRitual: boolean = false) {
         this._currentMission = mission;
-        this._currentState = 'QUESTIONING';
+        this._canSkipRitual = canSkipRitual;
+        this._ritualState = getRitualState(globalContext, mission.id);
+
+        // Tier 1 = Syntax/Typo: skip ritual, show mission card directly
+        const tier = mission.tier ?? 2;
+        const needsRitual = tier >= 2;
+
+        if (needsRitual && this._ritualState && this._ritualState.step < 3) {
+            this._currentState = 'RITUAL';
+        } else {
+            this._currentState = 'QUESTIONING';
+        }
+        
         this._currentPage = 1;
         this._hearts = 3;
         this._hintsUsed = 0;
@@ -146,6 +163,14 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                 this._onRequestHint();
                 break;
 
+            case 'SUBMIT_RITUAL_STEP':
+                this._onSubmitRitualStep(message.response, message.force);
+                break;
+
+            case 'SKIP_RITUAL':
+                this._onSkipRitual();
+                break;
+
             case 'SUBMIT_ANSWER':
                 if (this._isTesting) {
                     console.log('Zero-Magic Sidebar: Ignoring SUBMIT_ANSWER, test already running.');
@@ -178,9 +203,100 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                 this.reset();
                 break;
 
+            case 'SUBMIT_TIER2_ATTEMPT':
+                this._onSubmitTier2Attempt(message.hypothesis);
+                break;
+
+            case 'USE_TIER2_HINT':
+                if (this._hearts > 1) {
+                    this._hearts--;
+                    this._postState();
+                }
+                break;
+
+            case 'GO_TO_LINE':
+                this._goToLine(message.line);
+                break;
+
             default:
                 console.log('Zero-Magic Sidebar: Unknown message type', message.type);
         }
+    }
+
+    private async _onSubmitRitualStep(response: string, force: boolean = false) {
+        if (!this._currentMission) return;
+        const currentState = this._ritualState;
+        
+        // If we are submitting hypothesis, evaluate it via LLM first
+        if (this._currentState === 'RITUAL' && currentState && currentState.step < 3 && !force) {
+            this.postMessage({ type: 'HYPOTHESIS_FEEDBACK', status: 'LOADING' });
+            
+            // Reconstruct code snippet (using targetUri)
+            let snippet = "";
+            if (currentState.errorLines && currentState.errorLines.length > 0) {
+                snippet = currentState.errorLines.map(l => `Line ${l.line}: ${l.text}`).join('\n');
+            }
+            
+            const evalResult = await evaluateHypothesisAPI(
+                response,
+                this._currentMission.originalMessage || this._currentMission.originalErrorCode,
+                snippet
+            );
+            
+            this.postMessage({ type: 'HYPOTHESIS_FEEDBACK', status: evalResult.status, nudge: evalResult.nudge });
+            
+            if (evalResult.status !== 'PASS') {
+                // Do not advance step if fail/close
+                return;
+            }
+        }
+        
+        const state = await advanceStep(globalContext, this._currentMission.id, response);
+        this._ritualState = state;
+        await this._onRequestSolution();
+    }
+    
+    private async _onSubmitTier2Attempt(hypothesis: string) {
+        if (!this._currentMission || this._isTesting) return;
+
+        this._isTesting = true;
+        this.postMessage({ type: 'HYPOTHESIS_FEEDBACK', status: 'LOADING' });
+
+        if (hypothesis && hypothesis.trim().length > 0) {
+            evaluateHypothesisAPI(
+                hypothesis,
+                this._currentMission.originalMessage || this._currentMission.originalErrorCode,
+                this._currentMission.errorLineNumber?.toString() || ""
+            ).then(res => {
+                this.postMessage({ type: 'HYPOTHESIS_FEEDBACK', status: res.status, nudge: res.nudge });
+            }).catch(console.error);
+        }
+
+        this._isTesting = false; 
+        await this._retrigger();
+    }
+
+    private async _goToLine(line: number) {
+        if (this._currentMission && this._currentMission.targetUri) {
+            const uri = vscode.Uri.parse(this._currentMission.targetUri);
+            try {
+                const doc = await vscode.workspace.openTextDocument(uri);
+                const editor = await vscode.window.showTextDocument(doc);
+                const range = new vscode.Range(line - 1, 0, line - 1, 0);
+                editor.selection = new vscode.Selection(range.start, range.end);
+                editor.revealRange(range, vscode.TextEditorRevealType.InCenter);
+            } catch (e) {
+                console.error("Failed to jump to line:", e);
+            }
+        }
+    }
+    
+    private async _onSkipRitual() {
+        if (!this._currentMission) return;
+        const state = await skipRitual(globalContext, this._currentMission.id);
+        this._ritualState = state;
+        this._currentState = 'QUESTIONING';
+        this._postState();
     }
 
     /**
@@ -476,7 +592,11 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                     this._currentState = 'FAILED';
                     await this._saveStepHistory(false);
                 } else {
-                    this._currentState = 'FAILED';
+                    if (mission.tier === 2) {
+                        this._currentState = 'QUESTIONING';
+                    } else {
+                        this._currentState = 'FAILED';
+                    }
                 }
                 this._postState();
             }
@@ -538,6 +658,10 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                 description: this._currentMission.description,
                 socraticQuestion: this._currentMission.socraticQuestion,
                 hints: this._currentMission.hints.slice(0, this._revealedHints),
+                allHints: this._currentMission.hints,
+                tier: this._currentMission.tier ?? 2,
+                errorLineNumber: this._currentMission.errorLineNumber ?? null,
+                errorRegions: this._currentMission.errorRegions ?? [],
             } : null,
             attempts: this._attempts,
             totalHints: this._currentMission?.hints.length ?? 0,
@@ -545,6 +669,8 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             customFailedMessage: this._customFailedMessage,
             expertSolution: this._expertSolution,
             runtimeSummary: this._currentMission?.runtimeSummary ?? null,
+            canSkipRitual: this._canSkipRitual,
+            ritualState: this._ritualState,
         });
     }
 
@@ -572,9 +698,9 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
 
         body {
             font-family: 'DM Mono', 'Courier New', monospace;
-            background-color: #13141c;
+            background-color: #1c1e26;
             color: #a6accd;
-            padding: 12px;
+            padding: 0;
             overflow-x: hidden;
             min-height: 100vh;
             display: flex;
@@ -587,10 +713,7 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             flex-direction: column;
             flex-grow: 1;
             background-color: #1c1e26;
-            border: 1px solid rgba(166, 172, 205, 0.15);
-            border-radius: 12px;
             overflow: hidden;
-            box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
             position: relative;
         }
 
@@ -720,42 +843,7 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             text-align: center;
         }
 
-        /* Title Bar with traffic lights */
-        .title-bar {
-            display: flex;
-            align-items: center;
-            justify-content: flex-start;
-            gap: 12px;
-            height: 38px;
-            background-color: rgba(0, 0, 0, 0.15);
-            border-bottom: 1px solid rgba(166, 172, 205, 0.1);
-            padding: 0 16px;
-        }
 
-        .window-controls {
-            display: flex;
-            gap: 8px;
-            flex-shrink: 0;
-        }
-
-        .control-dot {
-            width: 12px;
-            height: 12px;
-            border-radius: 50%;
-        }
-        .dot-red { background-color: #ff5f56; }
-        .dot-yellow { background-color: #ffbd2e; }
-        .dot-green { background-color: #27c93f; }
-
-        .window-title {
-            font-size: 0.8rem;
-            color: rgba(166, 172, 205, 0.6);
-            letter-spacing: 0.05em;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            flex-grow: 1;
-        }
 
 
         /* Content Wrapper */
@@ -776,7 +864,8 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             display: flex;
             flex-direction: column;
             gap: 12px;
-            min-height: 160px;
+            min-height: 45vh;
+            overflow-y: auto;
             transition: all 0.2s ease;
         }
 
@@ -790,37 +879,15 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
         }
 
         .question-text {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
             font-size: 0.9rem;
             line-height: 1.6;
-            color: #c5cdd8;
+            color: #e6edf3;
             white-space: pre-wrap;
             word-wrap: break-word;
         }
 
-        /* Capabilities equivalent - Key/Value Table */
-        .stats-panel {
-            border-top: 1px dashed rgba(166, 172, 205, 0.15);
-            padding-top: 16px;
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
-        }
 
-        .stats-row {
-            display: flex;
-            font-size: 0.85rem;
-            line-height: 1.5;
-        }
-
-        .stats-key {
-            width: 110px;
-            color: rgba(166, 172, 205, 0.5);
-        }
-
-        .stats-val {
-            color: #c5cdd8;
-            font-weight: 500;
-        }
 
         .heart-icon {
             font-size: 1.1rem;
@@ -835,7 +902,6 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             display: flex;
             flex-direction: column;
             gap: 12px;
-            margin-top: auto;
         }
 
         /* Terminal Menu Style Buttons */
@@ -847,7 +913,7 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             cursor: pointer;
             display: flex;
             align-items: center;
-            justify-content: flex-start;
+            justify-content: center;
             padding: 0 16px;
             border-radius: 6px;
             transition: all 0.2s ease;
@@ -864,6 +930,31 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             color: #f29879;
             border-color: #f29879;
             background-color: rgba(242, 152, 121, 0.03);
+        }
+
+        /* Specific retro hover colors for different buttons */
+        #btn-hint.btn-outline:hover {
+            color: #c3e88d;
+            border-color: #c3e88d;
+            background-color: rgba(195, 232, 141, 0.05);
+        }
+
+        #btn-resubmit.btn-outline:hover {
+            color: #c792ea;
+            border-color: #c792ea;
+            background-color: rgba(199, 146, 234, 0.05);
+        }
+
+        #btn-more-explanation.btn-outline:hover {
+            color: #89ddff;
+            border-color: #89ddff;
+            background-color: rgba(137, 221, 255, 0.05);
+        }
+
+        #btn-nav.btn-outline:hover {
+            color: #ffcb6b;
+            border-color: #ffcb6b;
+            background-color: rgba(255, 203, 107, 0.05);
         }
 
         /* Solid terminal action button */
@@ -900,15 +991,7 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             width: 100%;
         }
 
-        /* Terminal System Footer */
-        .system-footer {
-            font-size: 0.72rem;
-            color: rgba(166, 172, 205, 0.45);
-            margin-top: auto;
-            border-top: 1px dashed rgba(166, 172, 205, 0.15);
-            padding-top: 12px;
-            line-height: 1.4;
-        }
+
 
         /* Success & Failure Glass Banners */
         .result-box {
@@ -993,6 +1076,555 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
         ::-webkit-scrollbar-thumb:hover {
             background: rgba(166, 172, 205, 0.3);
         }
+
+        #theme-select {
+            background-color: #1c1e26;
+            color: #a6accd;
+            border: 1px solid rgba(166, 172, 205, 0.25);
+            border-radius: 4px;
+            padding: 2px 6px;
+            outline: none;
+            cursor: pointer;
+            font-size: 0.75rem;
+            font-family: inherit;
+        }
+
+        #theme-select option {
+            background-color: #1c1e26;
+            color: #a6accd;
+        }
+
+        /* ── RITUAL PANEL CSS (Base/Retro) ── */
+        .ritual-step-indicator { flex: 1; height: 3px; border-radius: 2px; transition: opacity 0.3s, background-color 0.3s; }
+        .ritual-step-indicator.active { background-color: #f29879; }
+        .ritual-step-indicator.inactive { background-color: rgba(166,172,205,0.2); }
+        .ritual-title-text { color: #f29879 !important; }
+        .ritual-card { border-radius: 6px; padding: 12px; }
+        .ritual-card-info { background: rgba(242,152,121,0.08); border: 1px dashed rgba(242,152,121,0.3); }
+        .ritual-card-warning { background: rgba(100,120,200,0.08); border: 1px dashed rgba(100,120,200,0.25); }
+        .ritual-card-title { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 8px; color: rgba(242,152,121,0.8); }
+        .ritual-card-title-warning { color: rgba(140,160,220,0.8); }
+        .ritual-code-block { font-family: 'DM Mono', monospace; font-size: 0.8rem; line-height: 1.7; color: #c5cdd8; }
+        .ritual-subtitle { font-size: 0.85rem; line-height: 1.6; color: rgba(166,172,205,0.8); }
+        .ritual-highlight { color: #e6edf3; }
+        .ritual-textarea { width: 100%; background: rgba(0,0,0,0.2); border: 1px dashed rgba(166,172,205,0.2); border-radius: 6px; color: #e6edf3; padding: 10px; font-family: inherit; font-size: 0.85rem; resize: vertical; outline: none; transition: border-color 0.2s ease; }
+        .ritual-textarea:focus { border-color: rgba(242,152,121,0.5); }
+        .ritual-counter { font-size: 0.78rem; color: rgba(166,172,205,0.5); }
+        .ritual-skip-link { color: rgba(166,172,205,0.45); font-size: 0.75rem; text-decoration: underline; transition: color 0.2s ease; }
+        .ritual-skip-link:hover { color: rgba(166,172,205,0.8); }
+
+        /* ── MODERN STARTUP THEME (Vercel/Linear Style) ── */
+        body.theme-startup {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background-color: #09090b;
+            color: #a1a1aa;
+            padding: 24px 16px;
+        }
+
+        body.theme-startup .terminal-window {
+            background-color: #09090b;
+        }
+
+        body.theme-startup .content {
+            padding: 0;
+            gap: 16px;
+        }
+
+        body.theme-startup .main-panel {
+            background: #18181b;
+            border: 1px solid #27272a;
+            border-radius: 12px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+            padding: 24px;
+        }
+
+        body.theme-startup .main-panel:hover {
+            border-color: #3f3f46;
+        }
+
+        body.theme-startup .section-header {
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: #71717a;
+        }
+
+        body.theme-startup .question-text {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            font-size: 0.95rem;
+            line-height: 1.6;
+            color: #d4d4d8;
+        }
+
+        body.theme-startup .question-text code {
+            background-color: #27272a;
+            color: #8b5cf6;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: 'Fira Code', monospace;
+            font-size: 0.85em;
+        }
+
+        body.theme-startup .heart-icon {
+            font-size: 1.1rem;
+            transition: transform 0.2s ease;
+        }
+
+        body.theme-startup .theme-switcher-container {
+            border-top: 1px solid #27272a !important;
+        }
+
+        body.theme-startup #theme-select {
+            background-color: #18181b !important;
+            border: 1px solid #3f3f46 !important;
+            color: #fafafa !important;
+        }
+
+        body.theme-startup #theme-select option {
+            background-color: #18181b !important;
+            color: #fafafa !important;
+        }
+
+        body.theme-startup .btn {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            border-radius: 8px;
+            font-size: 0.9rem;
+            font-weight: 600;
+            transition: all 0.2s ease;
+            height: 42px;
+        }
+
+        body.theme-startup .btn:active {
+            transform: scale(0.98);
+        }
+
+        body.theme-startup .btn-solid {
+            background: #fafafa;
+            color: #09090b;
+            border: none;
+        }
+
+        body.theme-startup .btn-solid:hover {
+            background: #e4e4e7;
+        }
+
+        body.theme-startup .btn-outline {
+            background: transparent;
+            color: #fafafa;
+            border: 1px solid #3f3f46;
+        }
+
+        body.theme-startup .btn-outline:hover {
+            background: #27272a;
+            color: #fafafa;
+            border-color: #3f3f46;
+        }
+
+        body.theme-startup #btn-hint.btn-outline:hover,
+        body.theme-startup #btn-resubmit.btn-outline:hover,
+        body.theme-startup #btn-more-explanation.btn-outline:hover,
+        body.theme-startup #btn-nav.btn-outline:hover {
+            color: #fafafa;
+            background: #27272a;
+            border-color: #3f3f46;
+        }
+
+        body.theme-startup .actions-panel {
+            border-top: 1px solid #27272a;
+        }
+
+        body.theme-startup .result-box {
+            border: 1px solid #27272a;
+            background: #18181b;
+        }
+
+        body.theme-startup .success-banner {
+            color: #10b981;
+        }
+
+        body.theme-startup .fail-banner {
+            color: #ef4444;
+        }
+
+        body.theme-startup .page-footer {
+            border-top: 1px solid #27272a;
+            color: #71717a;
+        }
+
+        body.theme-startup .page-footer span {
+            color: #fafafa !important;
+        }
+
+        body.theme-startup .loading-overlay {
+            background-color: rgba(9, 9, 11, 0.9);
+        }
+
+        body.theme-startup .pacman-top, 
+        body.theme-startup .pacman-bottom {
+            background-color: #8b5cf6;
+        }
+
+        body.theme-startup .dot {
+            background-color: #8b5cf6;
+        }
+
+        body.theme-startup .loading-text {
+            color: #8b5cf6;
+            font-family: 'Inter', -apple-system, sans-serif;
+            font-weight: 600;
+        }
+
+        body.theme-startup ::-webkit-scrollbar-thumb {
+            background: rgba(63, 63, 70, 0.5);
+        }
+        body.theme-startup ::-webkit-scrollbar-thumb:hover {
+            background: rgba(113, 113, 122, 0.8);
+        }
+
+        /* ── RITUAL PANEL CSS (Startup Override) ── */
+        body.theme-startup .ritual-step-indicator.active { background-color: #8b5cf6; }
+        body.theme-startup .ritual-step-indicator.inactive { background-color: #27272a; }
+        body.theme-startup .ritual-title-text { color: #8b5cf6 !important; }
+        body.theme-startup .ritual-card-info { background: rgba(139, 92, 246, 0.05); border: 1px solid #3f3f46; }
+        body.theme-startup .ritual-card-warning { background: rgba(14, 165, 233, 0.05); border: 1px solid #3f3f46; }
+        body.theme-startup .ritual-card-title { color: #a78bfa; font-weight: 600; font-family: 'Inter', sans-serif; }
+        body.theme-startup .ritual-card-title-warning { color: #38bdf8; }
+        body.theme-startup .ritual-code-block { font-family: 'Fira Code', monospace; color: #d4d4d8; }
+        body.theme-startup .ritual-subtitle { color: #a1a1aa; font-family: 'Inter', sans-serif; font-size: 0.9rem; }
+        body.theme-startup .ritual-highlight { color: #fafafa; }
+        body.theme-startup .ritual-textarea { background: #09090b; border: 1px solid #3f3f46; color: #fafafa; font-family: 'Inter', sans-serif; }
+        body.theme-startup .ritual-textarea:focus { border-color: #8b5cf6; box-shadow: 0 0 0 1px #8b5cf6; }
+        body.theme-startup .ritual-counter { color: #71717a; }
+        body.theme-startup .ritual-skip-link { color: #71717a; }
+        body.theme-startup .ritual-skip-link:hover { color: #a1a1aa; }
+
+        /* ── THE "NATIVE VS CODE" CHAMELEON THEME ── */
+        body.theme-native {
+            font-family: var(--vscode-font-family), sans-serif;
+            background-color: var(--vscode-sideBar-background);
+            color: var(--vscode-foreground);
+            padding: 24px 16px;
+        }
+
+        body.theme-native .terminal-window {
+            background-color: var(--vscode-sideBar-background);
+        }
+
+        body.theme-native .content {
+            padding: 0;
+            gap: 16px;
+        }
+
+        body.theme-native .main-panel {
+            background: var(--vscode-editor-background);
+            border: 1px solid var(--vscode-widget-border);
+            border-radius: 6px;
+            padding: 20px;
+            box-shadow: none;
+        }
+
+        body.theme-native .main-panel:hover {
+            border-color: var(--vscode-widget-border);
+        }
+
+        body.theme-native .section-header {
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            color: var(--vscode-descriptionForeground);
+            letter-spacing: 0.05em;
+        }
+
+        body.theme-native .question-text {
+            font-family: var(--vscode-font-family), sans-serif;
+            font-size: 0.95rem;
+            line-height: 1.6;
+            color: var(--vscode-editor-foreground);
+        }
+
+        body.theme-native .question-text code {
+            background-color: var(--vscode-textCodeBlock-background);
+            color: var(--vscode-textPreformat-foreground);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: var(--vscode-editor-font-family), monospace;
+            font-size: 0.85em;
+        }
+
+        body.theme-native .heart-icon {
+            font-size: 1.1rem;
+            transition: transform 0.2s ease;
+        }
+
+        body.theme-native #theme-select {
+            background-color: var(--vscode-sideBar-background) !important;
+            border: 1px solid var(--vscode-widget-border) !important;
+            color: var(--vscode-foreground) !important;
+        }
+
+        body.theme-native #theme-select option {
+            background-color: var(--vscode-sideBar-background) !important;
+            color: var(--vscode-foreground) !important;
+        }
+
+        body.theme-native .btn {
+            font-family: var(--vscode-font-family), sans-serif;
+            border-radius: 4px;
+            font-size: 0.9rem;
+            border: 1px solid transparent;
+            transition: all 0.2s ease;
+            height: 40px;
+        }
+
+        body.theme-native .btn-solid {
+            background: var(--vscode-button-background);
+            color: var(--vscode-button-foreground);
+            border: none;
+        }
+
+        body.theme-native .btn-solid:hover {
+            background: var(--vscode-button-hoverBackground);
+        }
+
+        body.theme-native .btn-outline {
+            background: var(--vscode-button-secondaryBackground);
+            color: var(--vscode-button-secondaryForeground);
+            border: 1px solid var(--vscode-widget-border);
+        }
+
+        body.theme-native .btn-outline:hover {
+            background: var(--vscode-button-secondaryHoverBackground);
+        }
+
+        body.theme-native #btn-hint.btn-outline:hover,
+        body.theme-native #btn-resubmit.btn-outline:hover,
+        body.theme-native #btn-more-explanation.btn-outline:hover,
+        body.theme-native #btn-nav.btn-outline:hover {
+            background: var(--vscode-button-secondaryHoverBackground);
+        }
+
+        body.theme-native .actions-panel {
+            border-top: 1px solid var(--vscode-panel-border);
+        }
+
+        body.theme-native .result-box {
+            border: 1px solid var(--vscode-widget-border);
+            background: var(--vscode-editor-background);
+        }
+
+        body.theme-native .success-banner {
+            color: var(--vscode-terminal-ansiGreen, #10b981);
+        }
+
+        body.theme-native .fail-banner {
+            color: var(--vscode-errorForeground);
+        }
+
+        body.theme-native .page-footer {
+            border-top: 1px dashed var(--vscode-panel-border);
+            color: var(--vscode-descriptionForeground);
+        }
+
+        body.theme-native .page-footer span {
+            color: var(--vscode-foreground) !important;
+        }
+
+        body.theme-native .loading-overlay {
+            background-color: var(--vscode-sideBar-background);
+            opacity: 0.95;
+        }
+
+        body.theme-native .pacman-top, 
+        body.theme-native .pacman-bottom {
+            background-color: var(--vscode-terminal-ansiYellow);
+        }
+
+        body.theme-native .dot {
+            background-color: var(--vscode-terminal-ansiYellow);
+        }
+
+        body.theme-native .loading-text {
+            color: var(--vscode-terminal-ansiYellow);
+            font-family: var(--vscode-font-family), sans-serif;
+            font-weight: bold;
+        }
+
+        /* ── RITUAL PANEL CSS (Native Override) ── */
+        body.theme-native .ritual-step-indicator.active { background-color: var(--vscode-button-background); }
+        body.theme-native .ritual-step-indicator.inactive { background-color: var(--vscode-editorHoverWidget-background); }
+        body.theme-native .ritual-title-text { color: var(--vscode-foreground) !important; font-family: var(--vscode-font-family); }
+        body.theme-native .ritual-card { border-radius: 4px; border-style: solid; border-width: 1px; }
+        body.theme-native .ritual-card-info { background: var(--vscode-textBlockQuote-background); border-color: var(--vscode-textBlockQuote-border); border-left: 4px solid var(--vscode-textBlockQuote-border); }
+        body.theme-native .ritual-card-warning { background: var(--vscode-textBlockQuote-background); border-color: var(--vscode-textBlockQuote-border); border-left: 4px solid var(--vscode-editorWarning-foreground); }
+        body.theme-native .ritual-card-title { color: var(--vscode-descriptionForeground); font-family: var(--vscode-font-family); text-transform: none; font-size: 0.85rem; font-weight: bold; }
+        body.theme-native .ritual-card-title-warning { color: var(--vscode-editorWarning-foreground); }
+        body.theme-native .ritual-code-block { font-family: var(--vscode-editor-font-family); color: var(--vscode-editor-foreground); background-color: var(--vscode-textCodeBlock-background); padding: 4px; border-radius: 4px; }
+        body.theme-native .ritual-subtitle { color: var(--vscode-descriptionForeground); font-family: var(--vscode-font-family); font-size: 0.9rem; }
+        body.theme-native .ritual-highlight { color: var(--vscode-foreground); font-weight: bold; }
+        body.theme-native .ritual-textarea { background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, transparent); color: var(--vscode-input-foreground); font-family: var(--vscode-font-family); border-radius: 2px; }
+        body.theme-native .ritual-textarea:focus { border-color: var(--vscode-focusBorder); outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+        body.theme-native .ritual-counter { color: var(--vscode-descriptionForeground); font-family: var(--vscode-font-family); }
+        body.theme-native .ritual-skip-link { color: var(--vscode-textLink-foreground); font-family: var(--vscode-font-family); }
+        body.theme-native .ritual-skip-link:hover { color: var(--vscode-textLink-activeForeground); }
+
+        /* ── HINT MODAL OVERLAY ── */
+        .hint-modal-overlay {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.65);
+            z-index: 9999;
+            align-items: center;
+            justify-content: center;
+            backdrop-filter: blur(4px);
+            animation: hintFadeIn 0.2s ease;
+        }
+        .hint-modal-overlay.visible {
+            display: flex;
+        }
+        @keyframes hintFadeIn {
+            from { opacity: 0; }
+            to   { opacity: 1; }
+        }
+        .hint-modal-box {
+            background: #1e1f28;
+            border: 1px solid rgba(167, 139, 250, 0.25);
+            border-radius: 14px;
+            width: 90%;
+            max-width: 360px;
+            padding: 0;
+            box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+            animation: hintSlideUp 0.25s ease;
+        }
+        @keyframes hintSlideUp {
+            from { transform: translateY(20px); opacity: 0; }
+            to   { transform: translateY(0); opacity: 1; }
+        }
+        .hint-modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 14px 18px 10px;
+        }
+        .hint-modal-title {
+            font-size: 0.82rem;
+            font-weight: 700;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            color: #a78bfa;
+        }
+        .hint-modal-close {
+            background: none;
+            border: none;
+            color: rgba(255,255,255,0.4);
+            font-size: 1.1rem;
+            cursor: pointer;
+            padding: 2px 6px;
+            border-radius: 4px;
+            transition: color 0.15s, background 0.15s;
+        }
+        .hint-modal-close:hover {
+            color: #fff;
+            background: rgba(255,255,255,0.08);
+        }
+        .hint-modal-divider {
+            border: none;
+            border-top: 1px dashed rgba(167, 139, 250, 0.2);
+            margin: 0 18px;
+        }
+        .hint-modal-body {
+            padding: 14px 18px 10px;
+            font-size: 0.88rem;
+            line-height: 1.65;
+            color: rgba(255,255,255,0.82);
+            min-height: 60px;
+        }
+        .hint-modal-counter {
+            padding: 0 18px 6px;
+            font-size: 0.7rem;
+            color: rgba(255,255,255,0.3);
+            letter-spacing: 0.06em;
+        }
+        .hint-modal-actions {
+            display: flex;
+            gap: 8px;
+            padding: 8px 18px 16px;
+        }
+        .hint-modal-btn {
+            flex: 1;
+            height: 36px;
+            border-radius: 8px;
+            font-family: inherit;
+            font-size: 0.8rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.15s ease;
+            letter-spacing: 0.03em;
+        }
+        .hint-btn-next {
+            background: #a78bfa;
+            color: #0e0e14;
+            border: none;
+        }
+        .hint-btn-next:hover {
+            background: #c4b5fd;
+        }
+        .hint-btn-next:disabled {
+            opacity: 0.35;
+            cursor: default;
+        }
+        .hint-btn-quit {
+            background: transparent;
+            color: rgba(255,255,255,0.55);
+            border: 1px solid rgba(255,255,255,0.12);
+        }
+        .hint-btn-quit:hover {
+            color: #fff;
+            border-color: rgba(255,255,255,0.3);
+        }
+
+        /* ── HINT MODAL: Startup theme override ── */
+        body.theme-startup .hint-modal-box {
+            background: #09090b;
+            border-color: rgba(139, 92, 246, 0.3);
+        }
+        body.theme-startup .hint-modal-title {
+            color: #8b5cf6;
+        }
+        body.theme-startup .hint-btn-next {
+            background: #8b5cf6;
+        }
+        body.theme-startup .hint-btn-next:hover {
+            background: #a78bfa;
+        }
+
+        /* ── HINT MODAL: Native VS Code theme override ── */
+        body.theme-native .hint-modal-box {
+            background: var(--vscode-editor-background);
+            border-color: var(--vscode-widget-border);
+            border-radius: 6px;
+        }
+        body.theme-native .hint-modal-title {
+            color: var(--vscode-foreground);
+            font-family: var(--vscode-font-family);
+        }
+        body.theme-native .hint-modal-body {
+            color: var(--vscode-editor-foreground);
+            font-family: var(--vscode-font-family);
+        }
+        body.theme-native .hint-btn-next {
+            background: var(--vscode-button-background);
+            color: var(--vscode-button-foreground);
+        }
+        body.theme-native .hint-btn-next:hover {
+            background: var(--vscode-button-hoverBackground);
+        }
+        body.theme-native .hint-btn-quit {
+            background: var(--vscode-button-secondaryBackground);
+            color: var(--vscode-button-secondaryForeground);
+            border-color: var(--vscode-widget-border);
+        }
     </style>
 </head>
 <body>
@@ -1014,14 +1646,21 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             <div class="loading-text" id="loading-text">Initializing Socratic Mission...</div>
         </div>
 
-        <!-- Window Title Bar -->
-        <div class="title-bar">
-            <div class="window-controls">
-                <span class="control-dot dot-red"></span>
-                <span class="control-dot dot-yellow"></span>
-                <span class="control-dot dot-green"></span>
+        <!-- ── HINT POPUP MODAL ── -->
+        <div class="hint-modal-overlay" id="hint-modal-overlay">
+            <div class="hint-modal-box">
+                <div class="hint-modal-header">
+                    <span class="hint-modal-title">HINT REVEALED</span>
+                    <button class="hint-modal-close" id="hint-modal-close" title="Close">&times;</button>
+                </div>
+                <hr class="hint-modal-divider">
+                <div class="hint-modal-body" id="hint-modal-body">Loading hint…</div>
+                <div class="hint-modal-counter" id="hint-modal-counter">Hint 1 of 3</div>
+                <div class="hint-modal-actions">
+                    <button class="hint-modal-btn hint-btn-quit" id="hint-btn-quit">Quit &amp; Build</button>
+                    <button class="hint-modal-btn hint-btn-next" id="hint-btn-next">Next Hint &rarr;</button>
+                </div>
             </div>
-            <div class="window-title">zero-magic ~ /challenge</div>
         </div>
 
         <!-- content area -->
@@ -1029,30 +1668,232 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
 
             <!-- MAIN PANEL -->
             <div class="main-panel" id="main-panel">
-                <div class="section-header" id="panel-title">Welcome, developer.</div>
-                <div class="question-text" id="question-text">Before you can fix the error, what information do you need to gather?</div>
+                <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px dashed rgba(166, 172, 205, 0.15); padding-bottom: 8px; margin-bottom: 4px;">
+                    <div class="section-header" id="panel-title" style="margin-bottom: 0;">EXPLANATION</div>
+                    <div id="hearts-capsule" style="display: flex; gap: 4px;">
+                        <span class="heart-icon">♥</span>
+                        <span class="heart-icon">♥</span>
+                        <span class="heart-icon">♥</span>
+                    </div>
+                </div>
+                
+                <!-- Page 1 Paper Layout (Tier 2 wireframe-accurate) -->
+                <div id="page-1-layout" style="display: flex; flex-direction: column; gap: 0; margin-top: 12px;">
+
+                    <!-- ───── MEANING CARD ───── -->
+                    <div id="meaning-card" style="
+                        border: 1px solid rgba(255,255,255,0.08);
+                        border-radius: 14px;
+                        overflow: hidden;
+                        background: rgba(255,255,255,0.03);
+                    ">
+                        <!-- Card header row: "Meaning" label + < [line#] > error navigator -->
+                        <div style="
+                            display: flex;
+                            justify-content: space-between;
+                            align-items: center;
+                            padding: 10px 14px 8px;
+                            border-bottom: 1px solid rgba(255,255,255,0.06);
+                        ">
+                            <span style="font-size:0.78rem; font-weight:700; letter-spacing:0.08em; text-transform:uppercase; color: rgba(255,255,255,0.45);">Meaning</span>
+                            <!-- Error line navigator: < [12] > -->
+                            <div id="error-line-navigator" style="
+                                display: none;
+                                align-items: center;
+                                gap: 0;
+                                background: rgba(167,139,250,0.08);
+                                border: 1px solid rgba(167,139,250,0.25);
+                                border-radius: 8px;
+                                overflow: hidden;
+                            ">
+                                <button id="btn-error-prev" title="Previous error" style="
+                                    background: none;
+                                    border: none;
+                                    border-right: 1px solid rgba(167,139,250,0.2);
+                                    color: #a78bfa;
+                                    font-family: 'DM Mono', monospace;
+                                    font-size: 0.85rem;
+                                    padding: 3px 8px;
+                                    cursor: pointer;
+                                    line-height: 1;
+                                    transition: background 0.15s;
+                                ">&lt;</button>
+                                <span id="error-line-display" style="
+                                    color: #a78bfa;
+                                    font-family: 'DM Mono', monospace;
+                                    font-size: 0.8rem;
+                                    padding: 3px 8px;
+                                    min-width: 28px;
+                                    text-align: center;
+                                    letter-spacing: 0.04em;
+                                    cursor: default;
+                                    user-select: none;
+                                ">–</span>
+                                <button id="btn-error-next" title="Next error" style="
+                                    background: none;
+                                    border: none;
+                                    border-left: 1px solid rgba(167,139,250,0.2);
+                                    color: #a78bfa;
+                                    font-family: 'DM Mono', monospace;
+                                    font-size: 0.85rem;
+                                    padding: 3px 8px;
+                                    cursor: pointer;
+                                    line-height: 1;
+                                    transition: background 0.15s;
+                                ">&gt;</button>
+                            </div>
+                        </div>
+                        <!-- Card body: error description -->
+                        <div style="padding: 12px 14px 14px;">
+                            <div id="explanation-error-summary" style="
+                                font-size: 0.88rem;
+                                line-height: 1.6;
+                                color: rgba(255,255,255,0.75);
+                                min-height: 80px;
+                            ">Loading...</div>
+                        </div>
+                    </div>
+
+                    <!-- Tier 3 Location card (hidden for tier 2) -->
+                    <div class="ritual-card ritual-card-warning" id="location-card" style="margin-top:12px;">
+                        <div class="ritual-card-title ritual-card-title-warning">LOCATION</div>
+                        <input type="text" id="explanation-line-input" class="ritual-textarea" placeholder="Line #" style="width: 100px; padding: 6px; margin-top: 4px; box-sizing: border-box;">
+                        <div class="ritual-subtitle" style="margin-top: 8px;">Check the terminal and analyze the code to find the exact line.</div>
+                    </div>
+
+                    <!-- Tier 3 Hypothesis input (hidden for tier 2) -->
+                    <div id="hypothesis-section" style="margin-top:14px;">
+                        <div class="ritual-card-title" style="margin-bottom: 4px; color: var(--vscode-foreground);">HYPOTHESIS</div>
+                        <div class="ritual-subtitle" style="margin-bottom: 10px;">
+                            <b class="ritual-highlight" id="explanation-question-text">Before you can fix the error...</b><br>
+                            Write your best guess — even if you're not sure. No code, just words.
+                        </div>
+                        <textarea id="explanation-input" class="ritual-textarea" rows="4" placeholder="e.g. I think the variable is missing a value before being used..."></textarea>
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 8px;">
+                            <span id="explanation-counter" class="ritual-counter">0 / 20 min</span>
+                            <button class="btn btn-solid btn-blue" id="btn-explanation-submit" style="width: auto; padding: 0 18px; opacity: 0.5;" disabled>Submit &amp; Start &rarr;</button>
+                        </div>
+                    </div>
+
+                    <!-- ───── TIER 2: THINK CRITICALLY ───── -->
+                    <div id="tier2-hypothesis-section" style="display: none; margin-top: 14px;">
+                        <div style="
+                            border: 1px solid rgba(255,255,255,0.08);
+                            border-radius: 14px;
+                            overflow: hidden;
+                            background: rgba(255,255,255,0.03);
+                        ">
+                            <!-- Card header row -->
+                            <div style="
+                                display: flex;
+                                justify-content: space-between;
+                                align-items: center;
+                                padding: 10px 14px 8px;
+                                border-bottom: 1px solid rgba(255,255,255,0.06);
+                            ">
+                                <span style="font-size:0.78rem; font-weight:700; letter-spacing:0.08em; text-transform:uppercase; color: rgba(255,255,255,0.45);">Think critically</span>
+                            </div>
+                            
+                            <!-- Card body -->
+                            <div style="padding: 12px 14px 14px;">
+                                <textarea
+                                    id="tier2-hypothesis-input"
+                                    rows="3"
+                                    placeholder="Best guess"
+                                    style="
+                                        width: 100%;
+                                        box-sizing: border-box;
+                                        background: transparent;
+                                        border: none;
+                                        color: rgba(255,255,255,0.8);
+                                        font-family: 'DM Mono', monospace;
+                                        font-size: 0.85rem;
+                                        line-height: 1.5;
+                                        resize: vertical;
+                                        outline: none;
+                                    "
+                                ></textarea>
+                            </div>
+                        </div>
+                        <!-- Bottom row: Hint square + Submit pill -->
+                        <div style="display: flex; gap: 10px; margin-top: 10px; align-items: center;">
+                            <button
+                                id="btn-tier2-hint"
+                                title="Get a hint (costs 1 heart)"
+                                style="
+                                    width: 42px;
+                                    height: 42px;
+                                    flex-shrink: 0;
+                                    border-radius: 10px;
+                                    border: 1px solid rgba(244,63,94,0.35);
+                                    background: rgba(244,63,94,0.07);
+                                    color: #f43f5e;
+                                    font-size: 1.1rem;
+                                    cursor: pointer;
+                                    display: flex;
+                                    align-items: center;
+                                    justify-content: center;
+                                    transition: background 0.2s, transform 0.15s;
+                                "
+                            >💡</button>
+                            <button
+                                id="btn-tier2-submit"
+                                style="
+                                    flex: 1;
+                                    height: 42px;
+                                    border-radius: 10px;
+                                    border: none;
+                                    background: rgba(255,255,255,0.9);
+                                    color: #09090b;
+                                    font-weight: 700;
+                                    font-size: 0.9rem;
+                                    cursor: pointer;
+                                    letter-spacing: 0.03em;
+                                    transition: background 0.2s, transform 0.15s;
+                                "
+                            >Submit</button>
+                        </div>
+                    </div>
+
+                    <!-- ───── TIER 2: EXPLANATION ROUNDS (Round 2 & 3) ───── -->
+                    <div id="tier2-explanation-section" style="display: none; margin-top: 14px;">
+                        <div style="
+                            border: 1px solid rgba(56,189,248,0.2);
+                            border-radius: 12px;
+                            overflow: hidden;
+                            background: rgba(56,189,248,0.04);
+                        ">
+                            <div style="padding: 8px 14px; border-bottom: 1px solid rgba(56,189,248,0.15); font-size:0.75rem; font-weight:700; letter-spacing:0.08em; text-transform:uppercase; color: #38bdf8;">Explanation</div>
+                            <div id="tier2-explanation-text" style="padding: 12px 14px; font-size: 0.88rem; line-height: 1.6; color: rgba(255,255,255,0.75);">Loading...</div>
+                        </div>
+                        <button
+                            id="btn-tier2-resubmit"
+                            style="
+                                width: 100%;
+                                height: 42px;
+                                border-radius: 10px;
+                                border: none;
+                                background: rgba(255,255,255,0.9);
+                                color: #09090b;
+                                font-weight: 700;
+                                font-size: 0.9rem;
+                                cursor: pointer;
+                                margin-top: 10px;
+                                letter-spacing: 0.03em;
+                                transition: background 0.2s, transform 0.15s;
+                            "
+                        >Submit Fix</button>
+                    </div>
+
+                    <!-- Skip link -->
+                    <div id="ritual-skip-container" style="display: none; text-align: center; margin-top: 8px;">
+                        <a href="#" id="link-ritual-skip" class="ritual-skip-link">Skip ritual (Rank 3+)</a>
+                    </div>
+                </div>
+
+                <div class="question-text" id="question-text" style="display: none; margin-top: 8px;"></div>
             </div>
 
-            <!-- CAPABILITIES PANEL (Stats) -->
-            <div class="stats-panel">
-                <div class="section-header">Status</div>
-                <div class="stats-row">
-                    <span class="stats-key">Health</span>
-                    <span class="stats-val" id="hearts-capsule">
-                        <span class="heart-icon">♥</span>
-                        <span class="heart-icon">♥</span>
-                        <span class="heart-icon">♥</span>
-                    </span>
-                </div>
-                <div class="stats-row">
-                    <span class="stats-key">Hints</span>
-                    <span class="stats-val" id="hints-display">0 / 3</span>
-                </div>
-                <div class="stats-row">
-                    <span class="stats-key">Page</span>
-                    <span class="stats-val" id="page-display">1 of 3</span>
-                </div>
-            </div>
 
             <!-- RUNTIME CONTEXT PANEL -->
             <div class="runtime-panel hidden" id="runtime-panel">
@@ -1067,42 +1908,55 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                 <div class="runtime-summary" id="runtime-summary">Runtime failure detected — mission questions target this specific error.</div>
             </div>
 
-            <!-- NAVIGATION PANEL (Actions) -->
-            <div class="actions-panel">
-                <div class="section-header">Actions</div>
-                
-                <!-- Hint + Solution Actions -->
-                <div class="action-row" id="action-row">
-                    <button class="btn btn-outline btn-green" id="btn-hint">> /hint</button>
-                    <button class="btn btn-solid btn-blue" id="btn-action">> /explain</button>
+            <!-- Actions Section Removed per request -->
+
+            <!-- Page Indicator at the bottom -->
+            <div class="page-footer" style="display: flex; flex-direction: column; align-items: center; gap: 8px; margin-top: auto; font-size: 0.8rem; color: rgba(166, 172, 205, 0.5); border-top: 1px dashed rgba(166, 172, 205, 0.1); padding-top: 12px; padding-bottom: 8px;">
+                <div>
+                    Page <span id="page-display" style="color: #c5cdd8; font-weight: 500;">1 of 3</span>
                 </div>
-
-                <!-- Page 2 extra actions -->
-                <div class="extra-actions" id="extra-actions" style="display: none;">
-                    <button class="btn btn-solid" id="btn-resubmit">> /resubmit</button>
-                    <button class="btn btn-outline" id="btn-more-explanation">> /more_details</button>
-                </div>
-
-                <!-- Page 3 result box -->
-                <div class="result-box" id="result-box" style="display: none;"></div>
-
-                <!-- Navigation navigation-row -->
-                <div class="action-row">
-                    <button class="btn btn-outline" id="btn-nav">> /navigate_errors</button>
+                <!-- Theme Switcher Option -->
+                <div class="theme-switcher-container" style="display: flex; align-items: center; gap: 8px;">
+                    <span>Theme:</span>
+                    <select id="theme-select">
+                        <option value="retro">Retro Terminal</option>
+                        <option value="startup">Startup (Vercel/Linear)</option>
+                        <option value="native">Native VS Code</option>
+                    </select>
                 </div>
             </div>
 
-            <!-- Terminal System Footer -->
-            <div class="system-footer">
-                [system] Zero-Magic Socratic Engine v1.0.0 active.
-                <br>
-                [system] Listening for code diagnostic changes.
-            </div>
+
         </div>
     </div>
 
     <script nonce="${nonce}">
         const vscode = acquireVsCodeApi();
+        let canProceedAnyway = false;
+        
+        let currentRegionIndex = 0;
+        let regionHypotheses = [];
+        let currentErrorRegions = [];
+
+        function renderCurrentRegion() {
+            if (!currentErrorRegions || currentErrorRegions.length === 0) return;
+            const region = currentErrorRegions[currentRegionIndex];
+            const errorLineDisplay = document.getElementById('error-line-display');
+            const expSummary = document.getElementById('explanation-error-summary');
+            const hypInput = document.getElementById('tier2-hypothesis-input');
+            
+            if (errorLineDisplay) {
+                errorLineDisplay.textContent = region.formattedRange || (region.lineStart === region.lineEnd ? '#L' + String(region.lineStart) : '#L' + String(region.lineStart) + '-' + String(region.lineEnd));
+            }
+            if (expSummary) {
+                expSummary.textContent = region.meaning;
+            }
+            if (hypInput) {
+                hypInput.value = regionHypotheses[currentRegionIndex] || '';
+            }
+            
+            vscode.postMessage({ type: 'GO_TO_LINE', line: region.lineStart });
+        }
 
         const loadingOverlay = document.getElementById('loading-overlay');
         const loadingText = document.getElementById('loading-text');
@@ -1120,18 +1974,136 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             }, durationMs);
         }
 
+        // Utility: prevent XSS when rendering line content
+        function escapeHtml(str) {
+            return String(str)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;');
+        }
+
         // Run introduction loader on start
         window.addEventListener('DOMContentLoaded', () => {
             runLoader(3000, "Initializing Socratic Mission...");
+            vscode.postMessage({ type: 'REQUEST_STATE' });
         });
+
+        // ── Error line navigator (prev / next) ──────────────────────────────────
+        const btnErrorPrev = document.getElementById('btn-error-prev');
+        const btnErrorNext = document.getElementById('btn-error-next');
+        if (btnErrorPrev) {
+            btnErrorPrev.addEventListener('click', () => {
+                if (currentErrorRegions && currentErrorRegions.length > 0) {
+                    const hypInput = document.getElementById('tier2-hypothesis-input');
+                    if (hypInput) regionHypotheses[currentRegionIndex] = hypInput.value;
+                    currentRegionIndex = (currentRegionIndex - 1 + currentErrorRegions.length) % currentErrorRegions.length;
+                    renderCurrentRegion();
+                } else {
+                    vscode.postMessage({ type: 'NAVIGATE_ERROR', direction: 'prev' });
+                }
+            });
+        }
+        if (btnErrorNext) {
+            btnErrorNext.addEventListener('click', () => {
+                if (currentErrorRegions && currentErrorRegions.length > 0) {
+                    const hypInput = document.getElementById('tier2-hypothesis-input');
+                    if (hypInput) regionHypotheses[currentRegionIndex] = hypInput.value;
+                    currentRegionIndex = (currentRegionIndex + 1) % currentErrorRegions.length;
+                    renderCurrentRegion();
+                } else {
+                    vscode.postMessage({ type: 'NAVIGATE_ERROR', direction: 'next' });
+                }
+            });
+        }
+        // ──────────────────────────────────────────────────────────────────────
+
+        // ── Tier 2 event listeners ─────────────────────────────────────────────
+
+        const btnTier2Submit = document.getElementById('btn-tier2-submit');
+        if (btnTier2Submit) {
+            btnTier2Submit.addEventListener('click', () => {
+                const hypInput = document.getElementById('tier2-hypothesis-input');
+                if (currentErrorRegions && currentErrorRegions.length > 0) {
+                    if (hypInput) regionHypotheses[currentRegionIndex] = hypInput.value;
+                    const combined = currentErrorRegions.map((r, i) => 'Region ' + r.lineStart + ': ' + (regionHypotheses[i] || 'No guess')).join('\\n');
+                    vscode.postMessage({ type: 'SUBMIT_TIER2_ATTEMPT', hypothesis: combined });
+                } else {
+                    const hypVal = hypInput ? hypInput.value : '';
+                    vscode.postMessage({ type: 'SUBMIT_TIER2_ATTEMPT', hypothesis: hypVal });
+                }
+            });
+        }
+
+        const btnTier2Resubmit = document.getElementById('btn-tier2-resubmit');
+        if (btnTier2Resubmit) {
+            btnTier2Resubmit.addEventListener('click', () => {
+                vscode.postMessage({ type: 'SUBMIT_TIER2_ATTEMPT', hypothesis: '' });
+            });
+        }
+
+        const btnTier2Hint = document.getElementById('btn-tier2-hint');
+        if (btnTier2Hint) {
+            btnTier2Hint.addEventListener('click', () => {
+                openHintModal();
+            });
+        }
+        // ──────────────────────────────────────────────────────────────────────
+
+        // ── Hint Modal logic ──────────────────────────────────────────────
+        let allAvailableHints = [];
+        let currentHintIndex = 0;
+        const hintOverlay = document.getElementById('hint-modal-overlay');
+        const hintBody = document.getElementById('hint-modal-body');
+        const hintCounter = document.getElementById('hint-modal-counter');
+        const hintBtnNext = document.getElementById('hint-btn-next');
+        const hintBtnQuit = document.getElementById('hint-btn-quit');
+        const hintBtnClose = document.getElementById('hint-modal-close');
+
+        function openHintModal() {
+            if (!allAvailableHints || allAvailableHints.length === 0) return;
+            currentHintIndex = 0;
+            renderHintModal();
+            hintOverlay.classList.add('visible');
+        }
+
+        function renderHintModal() {
+            hintBody.textContent = allAvailableHints[currentHintIndex] || 'No hint available.';
+            hintCounter.textContent = 'Hint ' + (currentHintIndex + 1) + ' of ' + allAvailableHints.length;
+            if (currentHintIndex >= allAvailableHints.length - 1) {
+                hintBtnNext.disabled = true;
+                hintBtnNext.textContent = 'No more hints';
+            } else {
+                hintBtnNext.disabled = false;
+                hintBtnNext.innerHTML = 'Next Hint &rarr;';
+            }
+        }
+
+        function closeHintModal() {
+            hintOverlay.classList.remove('visible');
+        }
+
+        if (hintBtnNext) hintBtnNext.addEventListener('click', () => {
+            if (currentHintIndex < allAvailableHints.length - 1) {
+                currentHintIndex++;
+                renderHintModal();
+            }
+        });
+        if (hintBtnQuit) hintBtnQuit.addEventListener('click', closeHintModal);
+        if (hintBtnClose) hintBtnClose.addEventListener('click', closeHintModal);
 
         const btnHint = document.getElementById('btn-hint');
-        btnHint.addEventListener('click', () => {
-            vscode.postMessage({ type: 'REQUEST_HINT' });
+        if (btnHint) btnHint.addEventListener('click', () => {
+            openHintModal();
         });
+        // Also open hint modal when Tier 2 hint button is clicked
+        const btnTier2HintModal = document.getElementById('btn-tier2-hint');
+        if (btnTier2HintModal) {
+            btnTier2HintModal.removeEventListener && null; // placeholder
+        }
 
         const btnAction = document.getElementById('btn-action');
-        btnAction.addEventListener('click', () => {
+        if (btnAction) btnAction.addEventListener('click', () => {
             const text = btnAction.textContent || "";
             const isSubmit = text.indexOf('submit') !== -1 || text.indexOf('Submit') !== -1;
             if (isSubmit) {
@@ -1146,30 +2118,270 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
         });
 
         const btnResubmit = document.getElementById('btn-resubmit');
-        btnResubmit.addEventListener('click', () => {
+        if (btnResubmit) btnResubmit.addEventListener('click', () => {
             runLoader(1500, "Running diagnostic verification...", () => {
                 vscode.postMessage({ type: 'SUBMIT_ANSWER' });
             });
         });
 
         const btnMoreExplanation = document.getElementById('btn-more-explanation');
-        btnMoreExplanation.addEventListener('click', () => {
+        if (btnMoreExplanation) btnMoreExplanation.addEventListener('click', () => {
             runLoader(1500, "Extracting more details...", () => {
                 vscode.postMessage({ type: 'MORE_EXPLANATION' });
             });
         });
 
+        // Explanation / Ritual text input
+        const explanationInput = document.getElementById('explanation-input');
+        const explanationCounter = document.getElementById('explanation-counter');
+        const btnExplanationSubmit = document.getElementById('btn-explanation-submit');
+        const linkRitualSkip = document.getElementById('link-ritual-skip');
+
+        explanationInput.addEventListener('input', () => {
+            const len = explanationInput.value.length;
+            explanationCounter.textContent = len + ' / 20 min';
+            
+            if (canProceedAnyway) {
+                canProceedAnyway = false;
+                btnExplanationSubmit.textContent = 'Submit & Start \u2192';
+                const feedbackDiv = document.getElementById('ritual-feedback');
+                if (feedbackDiv) {
+                    feedbackDiv.style.display = 'none';
+                }
+            }
+            
+            btnExplanationSubmit.disabled = len < 20;
+            btnExplanationSubmit.style.opacity = len < 20 ? '0.5' : '1';
+        });
+
+        btnExplanationSubmit.addEventListener('click', () => {
+            const lineInput = document.getElementById('explanation-line-input');
+            const hypVal = explanationInput.value;
+            const lineVal = lineInput ? lineInput.value : '';
+            const combinedVal = "Line: " + lineVal + "\\nReason: " + hypVal;
+
+            if (canProceedAnyway) {
+                vscode.postMessage({ type: 'SUBMIT_RITUAL_STEP', response: combinedVal, force: true });
+                explanationInput.value = '';
+                if (lineInput) lineInput.value = '';
+                explanationInput.dispatchEvent(new Event('input'));
+                canProceedAnyway = false;
+            } else if (hypVal.length >= 20) {
+                vscode.postMessage({ type: 'SUBMIT_RITUAL_STEP', response: combinedVal });
+            }
+        });
+        
+        linkRitualSkip.addEventListener('click', (e) => {
+            e.preventDefault();
+            vscode.postMessage({ type: 'SKIP_RITUAL' });
+        });
+
         let navDirection = 'next';
         const btnNav = document.getElementById('btn-nav');
-        btnNav.addEventListener('click', () => {
+        if (btnNav) btnNav.addEventListener('click', () => {
             vscode.postMessage({ type: 'NAVIGATE_ERROR', direction: navDirection });
             navDirection = navDirection === 'next' ? 'prev' : 'next';
         });
 
+        // Theme switching logic
+        const themeSelect = document.getElementById('theme-select');
+        let activeTheme = 'retro';
+        try {
+            const state = vscode.getState();
+            if (state && state.theme) {
+                activeTheme = state.theme;
+            } else {
+                activeTheme = localStorage.getItem('socratic-theme') || 'retro';
+            }
+        } catch (e) {
+            try {
+                activeTheme = localStorage.getItem('socratic-theme') || 'retro';
+            } catch (err) {}
+        }
+
+        if (themeSelect) themeSelect.value = activeTheme;
+        document.body.classList.remove('theme-startup', 'theme-native');
+        if (activeTheme === 'startup') {
+            document.body.classList.add('theme-startup');
+        } else if (activeTheme === 'native') {
+            document.body.classList.add('theme-native');
+        }
+
+        if (themeSelect) {
+            themeSelect.addEventListener('change', (e) => {
+                const theme = e.target.value;
+                document.body.classList.remove('theme-startup', 'theme-native');
+                if (theme === 'startup') {
+                    document.body.classList.add('theme-startup');
+                } else if (theme === 'native') {
+                    document.body.classList.add('theme-native');
+                }
+                try {
+                    const currentState = vscode.getState() || {};
+                    currentState.theme = theme;
+                    vscode.setState(currentState);
+                } catch (err) {}
+                try {
+                    localStorage.setItem('socratic-theme', theme);
+                } catch (err) {}
+            });
+        }
+
         window.addEventListener('message', event => {
             const message = event.data;
+            
+            if (message.type === 'HYPOTHESIS_FEEDBACK') {
+                const btnExplanationSubmit = document.getElementById('btn-explanation-submit');
+                const explanationInput = document.getElementById('explanation-input');
+                let feedbackDiv = document.getElementById('ritual-feedback');
+                
+                if (!feedbackDiv) {
+                    feedbackDiv = document.createElement('div');
+                    feedbackDiv.id = 'ritual-feedback';
+                    feedbackDiv.className = 'ritual-feedback';
+                    feedbackDiv.style.marginTop = '8px';
+                    feedbackDiv.style.borderRadius = '4px';
+                    explanationInput.parentNode.insertBefore(feedbackDiv, explanationInput.nextSibling);
+                }
+
+                if (message.status === 'LOADING') {
+                    btnExplanationSubmit.textContent = 'Evaluating...';
+                    btnExplanationSubmit.disabled = true;
+                    explanationInput.disabled = true;
+                    feedbackDiv.style.display = 'none';
+                } else {
+                    explanationInput.disabled = false;
+                    feedbackDiv.style.display = 'block';
+                    feedbackDiv.className = 'ritual-feedback ' + message.status.toLowerCase();
+                    
+                    if (message.status === 'PASS') {
+                        btnExplanationSubmit.textContent = 'Submit & Start \u2192';
+                        btnExplanationSubmit.disabled = false;
+                        feedbackDiv.innerHTML = '<strong>PASS:</strong> Hypothesis accepted. Unlocking mission...';
+                        feedbackDiv.style.backgroundColor = 'var(--vscode-editorInfo-background, rgba(39, 201, 63, 0.1))';
+                        feedbackDiv.style.color = 'var(--vscode-testing-iconPassed, #27c93f)';
+                        feedbackDiv.style.borderLeft = '4px solid var(--vscode-testing-iconPassed, #27c93f)';
+                        feedbackDiv.style.padding = '8px';
+                        canProceedAnyway = false;
+                    } else {
+                        btnExplanationSubmit.textContent = 'Proceed anyway \u2192';
+                        btnExplanationSubmit.disabled = false;
+                        btnExplanationSubmit.style.opacity = '1';
+                        feedbackDiv.innerHTML = '<strong>' + message.status + ':</strong> ' + message.nudge;
+                        feedbackDiv.style.backgroundColor = 'var(--vscode-editorError-background, rgba(255, 95, 86, 0.1))';
+                        feedbackDiv.style.color = 'var(--vscode-errorForeground, #ff5f56)';
+                        feedbackDiv.style.borderLeft = '4px solid var(--vscode-errorForeground, #ff5f56)';
+                        feedbackDiv.style.padding = '8px';
+                        canProceedAnyway = true;
+                    }
+                }
+                return;
+            }
+
             if (message.type === 'STATE_UPDATE') {
-                const { page, hearts, hintsUsed, totalHints, revealedHints, hasFailedSubmit, mission, expertSolution, attempts, timeElapsed, terminalOutput, exitCode } = message;
+                const { state, page, hearts, hintsUsed, totalHints, revealedHints, hasFailedSubmit, mission, expertSolution, attempts, timeElapsed, terminalOutput, exitCode, ritualState, canSkipRitual } = message;
+
+                const mainPanel = document.getElementById('main-panel');
+                const actionsPanel = document.querySelector('.actions-panel');
+                const pageFooter = document.querySelector('.page-footer');
+                const page1Layout = document.getElementById('page-1-layout');
+                const questionText = document.getElementById('question-text');
+
+                if (mainPanel) mainPanel.style.display = 'flex';
+                if (actionsPanel) actionsPanel.style.display = 'flex';
+                if (pageFooter) pageFooter.style.display = 'flex';
+
+                // Populate hint modal data from all hints
+                if (mission && mission.allHints && mission.allHints.length > 0) {
+                    allAvailableHints = mission.allHints;
+                }
+
+                if (page === 1) {
+                    page1Layout.style.display = 'flex';
+                    questionText.style.display = 'none';
+
+                    const ritualSkipContainer = document.getElementById('ritual-skip-container');
+
+                    // If tier is 1, ritualState might be null, but we still show the layout
+                    const summaryEl = document.getElementById('explanation-error-summary');
+                    if (summaryEl) {
+                        summaryEl.textContent = (ritualState && ritualState.errorSummary) ? ritualState.errorSummary : (mission ? mission.description || mission.originalMessage : 'Examine the problem to proceed.');
+                    }
+
+                    // Lines card is now interactive input, so we don't populate error lines block.
+
+                    if (canSkipRitual) {
+                        ritualSkipContainer.style.display = 'block';
+                    } else {
+                        ritualSkipContainer.style.display = 'none';
+                    }
+
+                    // Tier 2 specific UI toggle
+                    const isTier2 = mission && mission.tier === 2;
+                    if (isTier2) {
+                        const locationCard = document.getElementById('location-card');
+                        if (locationCard) locationCard.style.display = 'none';
+
+                        const hypothesisSection = document.getElementById('hypothesis-section');
+                        if (hypothesisSection) hypothesisSection.style.display = 'none';
+
+                        // Show the error line navigator with the current line number
+                        const errorLineNavigator = document.getElementById('error-line-navigator');
+                        const errorLineDisplay = document.getElementById('error-line-display');
+                        if (errorLineNavigator) errorLineNavigator.style.display = 'flex';
+                        
+                        if (mission.errorRegions && mission.errorRegions.length > 0) {
+                            currentErrorRegions = mission.errorRegions;
+                            // Only reset hypothesis arrays if it's a completely new set of regions
+                            if (regionHypotheses.length !== mission.errorRegions.length) {
+                                regionHypotheses = new Array(mission.errorRegions.length).fill('');
+                            }
+                            currentRegionIndex = 0;
+                            renderCurrentRegion();
+                        } else {
+                            currentErrorRegions = [];
+                            if (errorLineDisplay && mission.errorLineNumber) {
+                                errorLineDisplay.textContent = '#L' + String(mission.errorLineNumber);
+                            }
+                        }
+
+                        const t2Hyp = document.getElementById('tier2-hypothesis-section');
+                        const t2Exp = document.getElementById('tier2-explanation-section');
+                        
+                        if (hearts === 3) {
+                            t2Hyp.style.display = 'block';
+                            t2Exp.style.display = 'none';
+                        } else {
+                            t2Hyp.style.display = 'none';
+                            t2Exp.style.display = 'block';
+                            
+                            const expText = document.getElementById('tier2-explanation-text');
+                            if (hearts === 2) {
+                                expText.innerHTML = (mission.hints && mission.hints.length > 0) ? escapeHtml(mission.hints[0]) : 'Look closely at your logic and references.';
+                            } else if (hearts === 1) {
+                                expText.innerHTML = (mission.hints && mission.hints.length > 1) ? escapeHtml(mission.hints[1]) : 'Are you calling the function or assigning the variable correctly?';
+                            }
+                        }
+                    } else {
+                        // Restore Tier 3 state
+                        const locationCard = document.getElementById('location-card');
+                        if (locationCard) locationCard.style.display = 'block';
+                        const hypothesisSection = document.getElementById('hypothesis-section');
+                        if (hypothesisSection) hypothesisSection.style.display = 'block';
+                        
+                        const errorLineNavigator = document.getElementById('error-line-navigator');
+                        if (errorLineNavigator) errorLineNavigator.style.display = 'none';
+                        
+                        const t2Hyp = document.getElementById('tier2-hypothesis-section');
+                        if (t2Hyp) t2Hyp.style.display = 'none';
+                        const t2Exp = document.getElementById('tier2-explanation-section');
+                        if (t2Exp) t2Exp.style.display = 'none';
+                    }
+                } else {
+                    page1Layout.style.display = 'none';
+                    questionText.style.display = 'block';
+                }
+
 
                 // ── Runtime Context Panel ────────────────────────────────────────
                 const runtimePanel = document.getElementById('runtime-panel');
@@ -1221,16 +2433,18 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
 
                 // Update Panel Title & Main Panel Content
                 const panelTitle = document.getElementById('panel-title');
-                const questionText = document.getElementById('question-text');
 
                 if (page === 1) {
-                    panelTitle.textContent = "Question";
-                    questionText.innerHTML = mission ? mission.socraticQuestion : "Before you can fix the error, what information do you need to gather?";
+                    panelTitle.textContent = "EXPLANATION";
+                    const explanationQuestionText = document.getElementById('explanation-question-text');
+                    if (explanationQuestionText) {
+                        explanationQuestionText.innerHTML = mission ? mission.socraticQuestion : "Before you can fix the error, what information do you need to gather?";
+                    }
                 } else if (page === 2) {
-                    panelTitle.textContent = "Explanation";
+                    panelTitle.textContent = "EXPLANATION";
                     questionText.innerHTML = expertSolution ? expertSolution.explanation.replace(/\\n/g, '<br>') : "Detailed Explanation of the error";
                 } else if (page === 3) {
-                    panelTitle.textContent = "Mission end";
+                    panelTitle.textContent = "MISSION END";
                     if (hearts > 0) {
                         questionText.innerHTML = "PASSED\\n\\nSummary of Debugging Process and Learning:\\n" + (expertSolution ? expertSolution.conceptSummary : "Good job fixing the error!");
                     } else {
@@ -1261,49 +2475,50 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                 }
 
                 // Update Buttons
-                btnHint.textContent = '> /hint (' + revealedHints + '/' + totalHints + ')';
+                if (typeof btnHint !== 'undefined' && btnHint) btnHint.textContent = '> /hint (' + revealedHints + '/' + totalHints + ')';
 
                 const actionRow = document.getElementById('action-row');
                 const extraActions = document.getElementById('extra-actions');
                 const resultBox = document.getElementById('result-box');
 
                 if (page === 1) {
-                    actionRow.style.display = 'flex';
-                    extraActions.style.display = 'none';
-                    resultBox.style.display = 'none';
-                    btnAction.textContent = "> /explain";
+                    if (actionRow) actionRow.style.display = 'flex';
+                    if (extraActions) extraActions.style.display = 'none';
+                    if (resultBox) resultBox.style.display = 'none';
+                    if (typeof btnAction !== 'undefined' && btnAction) btnAction.textContent = "> /explain";
                 } else if (page === 2) {
-                    actionRow.style.display = 'flex';
-                    btnAction.textContent = "> /submit";
+                    if (actionRow) actionRow.style.display = 'flex';
+                    if (typeof btnAction !== 'undefined' && btnAction) btnAction.textContent = "> /submit";
                     
                     if (hasFailedSubmit) {
-                        extraActions.style.display = 'flex';
+                        if (extraActions) extraActions.style.display = 'flex';
                     } else {
-                        extraActions.style.display = 'none';
+                        if (extraActions) extraActions.style.display = 'none';
                     }
-                    resultBox.style.display = 'none';
+                    if (resultBox) resultBox.style.display = 'none';
                 } else if (page === 3) {
-                    actionRow.style.display = 'none';
-                    extraActions.style.display = 'none';
-                    resultBox.style.display = 'block';
-
-                    if (hearts > 0) {
-                        resultBox.innerHTML = '<div class="success-banner">' +
-                            '<p>🎉 CONGRATULATIONS! 🎉</p>' +
-                            '<p style="font-size: 0.8rem; margin-top: 6px;">' +
-                                'You solved the challenge with ' + hearts + ' hearts remaining.' +
-                            '</p>' +
-                            '<p style="font-size: 0.75rem; margin-top: 4px;">' +
-                                'Time taken: ' + timeElapsed + 's | Hints used: ' + hintsUsed +
-                            '</p>' +
-                        '</div>';
-                    } else {
-                        resultBox.innerHTML = '<div class="fail-banner">' +
-                            '<p>💔 MISSION FAILED 💔</p>' +
-                            '<p style="font-size: 0.8rem; margin-top: 6px;">' +
-                                'No hearts remaining. Review the core concepts and try again!' +
-                            '</p>' +
-                        '</div>';
+                    if (actionRow) actionRow.style.display = 'none';
+                    if (extraActions) extraActions.style.display = 'none';
+                    if (resultBox) {
+                        resultBox.style.display = 'block';
+                        if (hearts > 0) {
+                            resultBox.innerHTML = '<div class="success-banner">' +
+                                '<p>🎉 CONGRATULATIONS! 🎉</p>' +
+                                '<p style="font-size: 0.8rem; margin-top: 6px;">' +
+                                    'You solved the challenge with ' + hearts + ' hearts remaining.' +
+                                '</p>' +
+                                '<p style="font-size: 0.75rem; margin-top: 4px;">' +
+                                    'Time taken: ' + timeElapsed + 's | Hints used: ' + hintsUsed +
+                                '</p>' +
+                            '</div>';
+                        } else {
+                            resultBox.innerHTML = '<div class="fail-banner">' +
+                                '<p>💔 MISSION FAILED 💔</p>' +
+                                '<p style="font-size: 0.8rem; margin-top: 6px;">' +
+                                    'No hearts remaining. Review the core concepts and try again!' +
+                                '</p>' +
+                            '</div>';
+                        }
                     }
                 }
             }

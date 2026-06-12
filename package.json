@@ -23,6 +23,17 @@
       {
         "command": "zeroMagic.renderSocraticDashboard",
         "title": "Zero-Magic: Render Dashboard"
+      },
+      {
+        "command": "zeroMagic.analyzeWholeFile",
+        "title": "Zero-Magic: Analyze Whole File"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "zeroMagic.analyzeWholeFile",
+        "key": "ctrl+alt+z",
+        "when": "editorFocus"
       }
     ],
     "viewsContainers": {
