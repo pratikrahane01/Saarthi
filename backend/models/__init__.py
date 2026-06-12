@@ -9,6 +9,12 @@ from .schemas import (
     FileAnalysisRequest,
     TierClassifyRequest,
     TierClassifyResponse,
+    RitualContextRequest,
+    RitualContextResponse,
+    ErrorLine,
+    AnalyzeErrorsRequest,
+    ErrorRegion,
+    AnalyzeErrorsResponse,
 )
 
 __all__ = [
@@ -19,4 +25,10 @@ __all__ = [
     "FileAnalysisRequest",
     "TierClassifyRequest",
     "TierClassifyResponse",
+    "RitualContextRequest",
+    "RitualContextResponse",
+    "ErrorLine",
+    "AnalyzeErrorsRequest",
+    "ErrorRegion",
+    "AnalyzeErrorsResponse",
 ]

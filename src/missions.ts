@@ -2,6 +2,8 @@ import * as vscode from 'vscode';
 import { DiagnosticEvent } from './watcher';
 import { ContextBuilder, BuiltContext, RuntimeSummary } from './contextBuilder';
 import * as interceptor from './interceptor';
+import { initRitual } from './debugTrainer';
+import { globalContext } from './extension';
 
 // ── Output channel for structured, persistent logging ────────────────────────
 // Using an output channel (vs. console.log) means logs are visible in the
@@ -64,11 +66,19 @@ export interface Mission {
     originalMessage: string;
     /** Runtime context summary — populated when terminal output was available. */
     runtimeSummary?: RuntimeSummary;
+    /** Error tier: 1=Syntax/Typo, 2=Logic/Type, 3=Runtime/Traceback */
+    tier?: 1 | 2 | 3;
+    /** 1-indexed line number where the error was detected */
+    errorLineNumber?: number;
+    /** Tier 2 Multi-Error Regions */
+    errorRegions?: { lineStart: number; lineEnd: number; meaning: string; formattedRange?: string }[];
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
-const BACKEND_URL = 'http://127.0.0.1:8000/v1/missions/generate-mission';
-const FETCH_TIMEOUT_MS = 8_000;
+const BACKEND_URL        = 'http://127.0.0.1:8000/v1/missions/generate-mission';
+const TIER_URL           = 'http://127.0.0.1:8000/v1/missions/classify-tier';
+const RITUAL_CONTEXT_URL = 'http://127.0.0.1:8000/v1/missions/ritual-context';
+const FETCH_TIMEOUT_MS   = 8_000;
 
 // ── Fallback mock (backend unreachable only) ──────────────────────────────────
 
@@ -111,7 +121,7 @@ function buildFallbackMission(ctx: BuiltContext, errorCode: string): Mission {
  *   hints      → hints
  *   hiddenTest → testPayload
  */
-function mapResponseToMission(response: MissionResponse, ctx: BuiltContext, errorCode: string): Mission {
+function mapResponseToMission(response: MissionResponse, ctx: BuiltContext, errorCode: string, lineNumber?: number): Mission {
     return {
         id: response.missionId,
         title: response.title,
@@ -125,6 +135,7 @@ function mapResponseToMission(response: MissionResponse, ctx: BuiltContext, erro
         originalErrorCode: errorCode,
         originalMessage: ctx.diagnosticMessage,
         runtimeSummary: ContextBuilder.instance.getRuntimeSummary(),
+        errorLineNumber: lineNumber,
     };
 }
 
@@ -258,11 +269,64 @@ export async function matchErrorToMission(event: DiagnosticEvent): Promise<Missi
     }
 
     // ── Map and return ────────────────────────────────────────────────────────
-    const mission = mapResponseToMission(validated, ctx, ctx.errorCode);
+    const mission = mapResponseToMission(validated, ctx, ctx.errorCode, event.lineNumber + 1);
     LOG.appendLine(`[matchErrorToMission] ✓ Mission matched: id="${mission.id}" title="${mission.title}"`);
     if (mission.runtimeSummary?.hasRuntimeData) {
         LOG.appendLine(`[matchErrorToMission] ✓ Runtime context included: exitCode=${mission.runtimeSummary.exitCode}`);
     }
+
+    // ── Tier classification (non-blocking) ────────────────────────────────────────
+    try {
+        const tierResp = await fetch(TIER_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                language: ctx.language,
+                errorCode: ctx.errorCode,
+                message: ctx.diagnosticMessage,
+                lineNumber: event.lineNumber,
+                sourceCode: ctx.sourceCode,
+                terminalOutput: ctx.terminalOutput,
+            }),
+        });
+        if (tierResp.ok) {
+            const tierData = await tierResp.json() as { tier: number };
+            mission.tier = tierData.tier as 1 | 2 | 3;
+            LOG.appendLine(`[matchErrorToMission] Tier classified: ${mission.tier}`);
+        }
+    } catch (e) {
+        LOG.appendLine(`[matchErrorToMission] Tier classification failed (non-fatal): ${e}`);
+        mission.tier = 2; // safe default
+    }
+
+    // ── Tier 2 Multi-Region Analysis ──────────────────────────────────────────
+    if (mission.tier === 2) {
+        try {
+            const ANALYZE_ERRORS_URL = 'http://127.0.0.1:8000/v1/missions/analyze-errors';
+            const analyzeResp = await fetch(ANALYZE_ERRORS_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    language: ctx.language,
+                    errorCode: ctx.errorCode,
+                    message: ctx.diagnosticMessage,
+                    sourceCode: ctx.sourceCode,
+                    lineNumber: event.lineNumber,
+                    terminalOutput: ctx.terminalOutput,
+                }),
+            });
+            if (analyzeResp.ok) {
+                const data = await analyzeResp.json() as { regions: any[] };
+                if (data.regions && data.regions.length > 0) {
+                    mission.errorRegions = data.regions;
+                    LOG.appendLine(`[matchErrorToMission] Tier 2 analyze-errors returned ${data.regions.length} regions`);
+                }
+            }
+        } catch (e) {
+            LOG.appendLine(`[matchErrorToMission] Tier 2 analyze-errors failed: ${e}`);
+        }
+    }
+
     return mission;
 }
 
@@ -281,10 +345,54 @@ export async function executeMissionHandOff(mission: Mission) {
         LOG.appendLine(`[executeMissionHandOff] === HAND-OFF ===`);
         LOG.appendLine(`  Mission : ${mission.title} (${mission.id})`);
         LOG.appendLine(`  Target  : ${mission.targetFilename}`);
+        LOG.appendLine(`  Tier    : ${mission.tier ?? 'unknown'}`);
+
+        // ── Phase 2: Debug Ritual gate (Tier 2 & 3 only) ──────────────────────────
+        // Tier 1 = Syntax/Typo errors → skip the ritual, go straight to mission card.
+        // Tier 2/3 = Logic / Runtime   → run the 3-step read ritual first.
+        const tier = mission.tier ?? 2;
+        const needsRitual = tier >= 2;
+
+        if (needsRitual) {
+            // Initialize the ritual state machine (no-op if already started)
+            const ritual = initRitual(globalContext, mission.id);
+
+            // Fetch a plain-English error summary + suspect lines from the backend
+            // so Steps 1 & 2 of the ritual have real, contextual content.
+            if (!ritual.errorSummary) {
+                try {
+                    const rc = await fetch(RITUAL_CONTEXT_URL, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            language: mission.language,
+                            errorCode: mission.originalErrorCode,
+                            message: mission.originalMessage,
+                            lineNumber: mission.errorLineNumber ?? 0,
+                            sourceCode: '',   // sidebar will be shown; keep payload small
+                            terminalOutput: mission.runtimeSummary?.lastTerminalError ?? '',
+                        }),
+                    });
+                    if (rc.ok) {
+                        const data = await rc.json() as { errorSummary: string; errorLines: { line: number; text: string }[] };
+                        // Persist the summary + lines into the ritual state
+                        const rituals = globalContext.workspaceState.get<any>('zeroMagic.rituals') || {};
+                        rituals[mission.id] = {
+                            ...rituals[mission.id],
+                            errorSummary: data.errorSummary,
+                            errorLines: data.errorLines,
+                            tier,
+                        };
+                        await globalContext.workspaceState.update('zeroMagic.rituals', rituals);
+                        LOG.appendLine(`[executeMissionHandOff] Ritual context fetched OK`);
+                    }
+                } catch (e) {
+                    LOG.appendLine(`[executeMissionHandOff] Ritual context fetch failed (non-fatal): ${e}`);
+                }
+            }
+        }
 
         // ── Step 1: Render the Socratic UI immediately (don't wait for tests) ───────
-        // The student sees the question + hints while the test runner works in
-        // the background. This keeps the UX responsive.
         await vscode.commands.executeCommand('zeroMagic.socraticSidebar.focus');
         await vscode.commands.executeCommand('zeroMagic.renderSocraticDashboard', mission);
 
@@ -294,8 +402,6 @@ export async function executeMissionHandOff(mission: Mission) {
             interceptor.invalidateAllExecutions()
         ]);
         
-        // The student must read the hints
-        // and manually click "Try Again" to trigger the interceptor.
         LOG.appendLine(`[executeMissionHandOff] UI hydrated. Halting execution to wait for student input.`);
         console.log("[ZERO-MAGIC] Mission loaded");
 
@@ -304,6 +410,7 @@ export async function executeMissionHandOff(mission: Mission) {
         console.error('Zero-Magic Hand-off pipeline failed:', err);
     }
 }
+
 
 export interface SolutionRequest {
     language: string;
@@ -419,6 +526,92 @@ export async function matchWholeFileToMission(fullCode: string, languageId: stri
     };
 
     const mission = mapResponseToMission(validated, mockContext, "FILE_ANALYSIS");
+    
+    try {
+        const tierResp = await fetch('http://127.0.0.1:8000/v1/missions/classify-tier', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                language: languageId,
+                errorCode: "FILE_ANALYSIS",
+                message: "Full File Analysis",
+                lineNumber: 0,
+                sourceCode: fullCode,
+                terminalOutput: "",
+            }),
+        });
+        if (tierResp.ok) {
+            const tierData = await tierResp.json() as { tier: number };
+            mission.tier = tierData.tier as 1 | 2 | 3;
+            LOG.appendLine(`[matchWholeFileToMission] Tier classified: ${mission.tier}`);
+        }
+    } catch (e) {
+        LOG.appendLine(`[matchWholeFileToMission] Tier classification failed (non-fatal): ${e}`);
+        mission.tier = 2; // safe default
+    }
+
+    if (mission.tier === 2) {
+        try {
+            const ANALYZE_ERRORS_URL = 'http://127.0.0.1:8000/v1/missions/analyze-errors';
+            const analyzeResp = await fetch(ANALYZE_ERRORS_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    language: languageId,
+                    errorCode: "FILE_ANALYSIS",
+                    message: "Full File Analysis",
+                    sourceCode: fullCode,
+                    lineNumber: 0,
+                    terminalOutput: "",
+                }),
+            });
+            if (analyzeResp.ok) {
+                const data = await analyzeResp.json() as { regions: any[] };
+                if (data.regions && data.regions.length > 0) {
+                    mission.errorRegions = data.regions;
+                    LOG.appendLine(`[matchWholeFileToMission] Tier 2 analyze-errors returned ${data.regions.length} regions`);
+                }
+            }
+        } catch (e) {
+            LOG.appendLine(`[matchWholeFileToMission] Tier 2 analyze-errors failed: ${e}`);
+        }
+    }
+
     LOG.appendLine(`[matchWholeFileToMission] ✓ File Mission matched: id="${mission.id}" title="${mission.title}"`);
     return mission;
 }
+
+export interface EvaluateHypothesisResponse {
+    status: 'PASS' | 'CLOSE' | 'FAIL';
+    nudge: string;
+}
+
+export async function evaluateHypothesisAPI(
+    userHypothesis: string,
+    actualError: string,
+    codeSnippet: string
+): Promise<EvaluateHypothesisResponse> {
+    const EVAL_URL = 'http://127.0.0.1:8000/v1/missions/evaluate-hypothesis';
+    try {
+        const response = await fetch(EVAL_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                user_hypothesis: userHypothesis,
+                actual_error: actualError,
+                code_snippet: codeSnippet
+            })
+        });
+
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+
+        const data = await response.json() as EvaluateHypothesisResponse;
+        return data;
+    } catch (e) {
+        LOG.appendLine(`[evaluateHypothesisAPI] Failed: ${e}`);
+        return { status: 'FAIL', nudge: 'Network error analyzing hypothesis.' };
+    }
+}
+

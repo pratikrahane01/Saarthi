@@ -400,3 +400,104 @@ class TierClassifyResponse(BaseModel):
             }
         }
     }
+
+
+# ---------------------------------------------------------------------------
+# Ritual Context Models
+# ---------------------------------------------------------------------------
+
+class ErrorLine(BaseModel):
+    """A single line of source code that is a suspect for the error."""
+    line: int = Field(..., description="1-indexed line number.")
+    text: str = Field(..., description="The text content of that line.")
+
+
+class RitualContextRequest(BaseModel):
+    """Payload for POST /v1/missions/ritual-context."""
+
+    language: str = Field(..., examples=["python"])
+    errorCode: str = Field(..., examples=["TypeError"])
+    message: str = Field(..., examples=["name 'x' is not defined"])
+    lineNumber: int = Field(default=0, examples=[14])
+    sourceCode: str = Field(default="")
+    terminalOutput: str = Field(default="")
+
+
+class RitualContextResponse(BaseModel):
+    """
+    Read-only content shown during the Debug Ritual.
+    Step 1 shows errorSummary; Step 2 shows errorLines.
+    """
+    errorSummary: str = Field(
+        ...,
+        description="Plain-English 2-3 sentence explanation of the error (no code, no fix).",
+    )
+    errorLines: list[ErrorLine] = Field(
+        default_factory=list,
+        description="Source lines near the error that the student should examine.",
+    )
+    fallback: bool = Field(
+        default=False,
+        description="True if the Groq API was unavailable and defaults were used.",
+    )
+
+# ---------------------------------------------------------------------------
+# Evaluate Hypothesis Models
+# ---------------------------------------------------------------------------
+
+class EvaluateHypothesisRequest(BaseModel):
+    """Payload for POST /v1/missions/evaluate-hypothesis."""
+    user_hypothesis: str
+    actual_error: str
+    code_snippet: str
+
+class EvaluateHypothesisResponse(BaseModel):
+    """Result of hypothesis evaluation."""
+    status: str = Field(..., description="PASS, CLOSE, or FAIL")
+    nudge: str = Field(..., description="Socratic nudge or empty string")
+
+
+# ---------------------------------------------------------------------------
+# Analyze Errors (Multi-Region) Models
+# ---------------------------------------------------------------------------
+
+class AnalyzeErrorsRequest(BaseModel):
+    """Payload for POST /v1/missions/analyze-errors.
+
+    The extension sends source code + error context after a Tier 2
+    classification. The backend identifies 2-4 suspect regions in the code.
+    """
+    language: str = Field(..., examples=["python"])
+    errorCode: str = Field(..., examples=["TypeError"])
+    message: str = Field(..., examples=["'NoneType' object is not subscriptable"])
+    sourceCode: str = Field(..., description="Complete source code of the active file.")
+    lineNumber: int = Field(default=0, description="Line where the primary error was reported.")
+    terminalOutput: str = Field(default="", description="Terminal output if available.")
+
+
+class ErrorRegion(BaseModel):
+    """A single suspect region in the source code."""
+    lineStart: int = Field(..., description="1-indexed start line of the suspect region.")
+    lineEnd: int = Field(..., description="1-indexed end line (same as lineStart for single-line).")
+    meaning: str = Field(
+        ...,
+        description="Plain-English 1-2 sentence explanation of what might be wrong here.",
+    )
+    formattedRange: str = Field(
+        ...,
+        description="Line range formatted exactly as ' #L<start> - <end> ' or ' #L<start> '.",
+    )
+
+
+class AnalyzeErrorsResponse(BaseModel):
+    """Response from POST /v1/missions/analyze-errors.
+
+    Contains 2-4 suspect regions the student should investigate.
+    """
+    regions: list[ErrorRegion] = Field(
+        ...,
+        description="Ordered list of suspect code regions with explanations.",
+        min_length=1,
+        max_length=6,
+    )
+

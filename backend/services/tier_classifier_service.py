@@ -85,6 +85,10 @@ _TIER1_TIPS: dict[str, str] = {
     "EOL while scanning":   "Tip: A string literal is missing its closing quote. Check for a stray `'` or `\"` on the reported line.",
     "EOF while parsing":    "Tip: The file ended before all blocks were closed. Scroll to the bottom — you are likely missing a closing bracket or parenthesis.",
     "expected an indented block": "Tip: Every `if`, `for`, `def`, or `class` block needs at least one indented statement. Use `pass` as a placeholder.",
+    "Expected ':'":         "Tip: Python requires a colon (:) at the end of if, for, while, def, and class statements.",
+    "Expected expression":  "Tip: An expression was expected here. Check for trailing operators, missing values, or unclosed brackets before this line.",
+    "invalid syntax":       "Tip: The parser couldn't make sense of this line. Check for missing punctuation, unmatched brackets, or typos just before this point.",
+    "statement expected":   "Tip: A valid statement was expected. Check for incomplete lines or missing keywords.",
 }
 
 _TIER1_PATTERNS: list[tuple[re.Pattern[str], str]] = [
@@ -102,6 +106,10 @@ _TIER1_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"EOL while scanning", re.I), "EOL while scanning"),
     (re.compile(r"EOF while parsing",  re.I), "EOF while parsing"),
     (re.compile(r"expected an indented block", re.I), "expected an indented block"),
+    (re.compile(r"Expected ':'",       re.I), "Expected ':'"),
+    (re.compile(r"Expected expression",re.I), "Expected expression"),
+    (re.compile(r"invalid syntax",     re.I), "invalid syntax"),
+    (re.compile(r"statement expected", re.I), "statement expected"),
 ]
 
 # Tier 3 fast-path: deep runtime signals that skip straight to Deep Dive
