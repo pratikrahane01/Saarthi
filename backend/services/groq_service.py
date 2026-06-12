@@ -651,7 +651,7 @@ def analyze_error_regions(
     # Base fallback if API is unavailable or fails
     fallback_start = line_number if line_number > 0 else 1
     fallback_end = line_number if line_number > 0 else 1
-    fallback_fmt = f" #L{fallback_start} - {fallback_end} " if fallback_start != fallback_end else f" #L{fallback_start} "
+    fallback_fmt = f" #L{fallback_start}-{fallback_end} " if fallback_start != fallback_end else f" #L{fallback_start} "
     fallback_region = ErrorRegion(
         lineStart=fallback_start,
         lineEnd=fallback_end,
@@ -724,7 +724,7 @@ def analyze_error_regions(
             start = int(r.get("lineStart", 1))
             end = int(r.get("lineEnd", start))
             meaning = str(r.get("meaning", "Inspect this region for potential logic errors."))
-            formatted_range = f" #L{start} - {end} " if start != end else f" #L{start} "
+            formatted_range = f" #L{start}-{end} " if start != end else f" #L{start} "
             regions.append(ErrorRegion(
                 lineStart=start,
                 lineEnd=end,

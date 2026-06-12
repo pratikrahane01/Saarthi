@@ -658,6 +658,7 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                 description: this._currentMission.description,
                 socraticQuestion: this._currentMission.socraticQuestion,
                 hints: this._currentMission.hints.slice(0, this._revealedHints),
+                allHints: this._currentMission.hints,
                 tier: this._currentMission.tier ?? 2,
                 errorLineNumber: this._currentMission.errorLineNumber ?? null,
                 errorRegions: this._currentMission.errorRegions ?? [],
@@ -1466,6 +1467,164 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
         body.theme-native .ritual-counter { color: var(--vscode-descriptionForeground); font-family: var(--vscode-font-family); }
         body.theme-native .ritual-skip-link { color: var(--vscode-textLink-foreground); font-family: var(--vscode-font-family); }
         body.theme-native .ritual-skip-link:hover { color: var(--vscode-textLink-activeForeground); }
+
+        /* ── HINT MODAL OVERLAY ── */
+        .hint-modal-overlay {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.65);
+            z-index: 9999;
+            align-items: center;
+            justify-content: center;
+            backdrop-filter: blur(4px);
+            animation: hintFadeIn 0.2s ease;
+        }
+        .hint-modal-overlay.visible {
+            display: flex;
+        }
+        @keyframes hintFadeIn {
+            from { opacity: 0; }
+            to   { opacity: 1; }
+        }
+        .hint-modal-box {
+            background: #1e1f28;
+            border: 1px solid rgba(167, 139, 250, 0.25);
+            border-radius: 14px;
+            width: 90%;
+            max-width: 360px;
+            padding: 0;
+            box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+            animation: hintSlideUp 0.25s ease;
+        }
+        @keyframes hintSlideUp {
+            from { transform: translateY(20px); opacity: 0; }
+            to   { transform: translateY(0); opacity: 1; }
+        }
+        .hint-modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 14px 18px 10px;
+        }
+        .hint-modal-title {
+            font-size: 0.82rem;
+            font-weight: 700;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            color: #a78bfa;
+        }
+        .hint-modal-close {
+            background: none;
+            border: none;
+            color: rgba(255,255,255,0.4);
+            font-size: 1.1rem;
+            cursor: pointer;
+            padding: 2px 6px;
+            border-radius: 4px;
+            transition: color 0.15s, background 0.15s;
+        }
+        .hint-modal-close:hover {
+            color: #fff;
+            background: rgba(255,255,255,0.08);
+        }
+        .hint-modal-divider {
+            border: none;
+            border-top: 1px dashed rgba(167, 139, 250, 0.2);
+            margin: 0 18px;
+        }
+        .hint-modal-body {
+            padding: 14px 18px 10px;
+            font-size: 0.88rem;
+            line-height: 1.65;
+            color: rgba(255,255,255,0.82);
+            min-height: 60px;
+        }
+        .hint-modal-counter {
+            padding: 0 18px 6px;
+            font-size: 0.7rem;
+            color: rgba(255,255,255,0.3);
+            letter-spacing: 0.06em;
+        }
+        .hint-modal-actions {
+            display: flex;
+            gap: 8px;
+            padding: 8px 18px 16px;
+        }
+        .hint-modal-btn {
+            flex: 1;
+            height: 36px;
+            border-radius: 8px;
+            font-family: inherit;
+            font-size: 0.8rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.15s ease;
+            letter-spacing: 0.03em;
+        }
+        .hint-btn-next {
+            background: #a78bfa;
+            color: #0e0e14;
+            border: none;
+        }
+        .hint-btn-next:hover {
+            background: #c4b5fd;
+        }
+        .hint-btn-next:disabled {
+            opacity: 0.35;
+            cursor: default;
+        }
+        .hint-btn-quit {
+            background: transparent;
+            color: rgba(255,255,255,0.55);
+            border: 1px solid rgba(255,255,255,0.12);
+        }
+        .hint-btn-quit:hover {
+            color: #fff;
+            border-color: rgba(255,255,255,0.3);
+        }
+
+        /* ── HINT MODAL: Startup theme override ── */
+        body.theme-startup .hint-modal-box {
+            background: #09090b;
+            border-color: rgba(139, 92, 246, 0.3);
+        }
+        body.theme-startup .hint-modal-title {
+            color: #8b5cf6;
+        }
+        body.theme-startup .hint-btn-next {
+            background: #8b5cf6;
+        }
+        body.theme-startup .hint-btn-next:hover {
+            background: #a78bfa;
+        }
+
+        /* ── HINT MODAL: Native VS Code theme override ── */
+        body.theme-native .hint-modal-box {
+            background: var(--vscode-editor-background);
+            border-color: var(--vscode-widget-border);
+            border-radius: 6px;
+        }
+        body.theme-native .hint-modal-title {
+            color: var(--vscode-foreground);
+            font-family: var(--vscode-font-family);
+        }
+        body.theme-native .hint-modal-body {
+            color: var(--vscode-editor-foreground);
+            font-family: var(--vscode-font-family);
+        }
+        body.theme-native .hint-btn-next {
+            background: var(--vscode-button-background);
+            color: var(--vscode-button-foreground);
+        }
+        body.theme-native .hint-btn-next:hover {
+            background: var(--vscode-button-hoverBackground);
+        }
+        body.theme-native .hint-btn-quit {
+            background: var(--vscode-button-secondaryBackground);
+            color: var(--vscode-button-secondaryForeground);
+            border-color: var(--vscode-widget-border);
+        }
     </style>
 </head>
 <body>
@@ -1487,7 +1646,22 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             <div class="loading-text" id="loading-text">Initializing Socratic Mission...</div>
         </div>
 
-
+        <!-- ── HINT POPUP MODAL ── -->
+        <div class="hint-modal-overlay" id="hint-modal-overlay">
+            <div class="hint-modal-box">
+                <div class="hint-modal-header">
+                    <span class="hint-modal-title">HINT REVEALED</span>
+                    <button class="hint-modal-close" id="hint-modal-close" title="Close">&times;</button>
+                </div>
+                <hr class="hint-modal-divider">
+                <div class="hint-modal-body" id="hint-modal-body">Loading hint…</div>
+                <div class="hint-modal-counter" id="hint-modal-counter">Hint 1 of 3</div>
+                <div class="hint-modal-actions">
+                    <button class="hint-modal-btn hint-btn-quit" id="hint-btn-quit">Quit &amp; Build</button>
+                    <button class="hint-modal-btn hint-btn-next" id="hint-btn-next">Next Hint &rarr;</button>
+                </div>
+            </div>
+        </div>
 
         <!-- content area -->
         <div class="content">
@@ -1871,15 +2045,62 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
         const btnTier2Hint = document.getElementById('btn-tier2-hint');
         if (btnTier2Hint) {
             btnTier2Hint.addEventListener('click', () => {
-                vscode.postMessage({ type: 'USE_TIER2_HINT' });
+                openHintModal();
             });
         }
         // ──────────────────────────────────────────────────────────────────────
 
+        // ── Hint Modal logic ──────────────────────────────────────────────
+        let allAvailableHints = [];
+        let currentHintIndex = 0;
+        const hintOverlay = document.getElementById('hint-modal-overlay');
+        const hintBody = document.getElementById('hint-modal-body');
+        const hintCounter = document.getElementById('hint-modal-counter');
+        const hintBtnNext = document.getElementById('hint-btn-next');
+        const hintBtnQuit = document.getElementById('hint-btn-quit');
+        const hintBtnClose = document.getElementById('hint-modal-close');
+
+        function openHintModal() {
+            if (!allAvailableHints || allAvailableHints.length === 0) return;
+            currentHintIndex = 0;
+            renderHintModal();
+            hintOverlay.classList.add('visible');
+        }
+
+        function renderHintModal() {
+            hintBody.textContent = allAvailableHints[currentHintIndex] || 'No hint available.';
+            hintCounter.textContent = 'Hint ' + (currentHintIndex + 1) + ' of ' + allAvailableHints.length;
+            if (currentHintIndex >= allAvailableHints.length - 1) {
+                hintBtnNext.disabled = true;
+                hintBtnNext.textContent = 'No more hints';
+            } else {
+                hintBtnNext.disabled = false;
+                hintBtnNext.innerHTML = 'Next Hint &rarr;';
+            }
+        }
+
+        function closeHintModal() {
+            hintOverlay.classList.remove('visible');
+        }
+
+        if (hintBtnNext) hintBtnNext.addEventListener('click', () => {
+            if (currentHintIndex < allAvailableHints.length - 1) {
+                currentHintIndex++;
+                renderHintModal();
+            }
+        });
+        if (hintBtnQuit) hintBtnQuit.addEventListener('click', closeHintModal);
+        if (hintBtnClose) hintBtnClose.addEventListener('click', closeHintModal);
+
         const btnHint = document.getElementById('btn-hint');
         if (btnHint) btnHint.addEventListener('click', () => {
-            vscode.postMessage({ type: 'REQUEST_HINT' });
+            openHintModal();
         });
+        // Also open hint modal when Tier 2 hint button is clicked
+        const btnTier2HintModal = document.getElementById('btn-tier2-hint');
+        if (btnTier2HintModal) {
+            btnTier2HintModal.removeEventListener && null; // placeholder
+        }
 
         const btnAction = document.getElementById('btn-action');
         if (btnAction) btnAction.addEventListener('click', () => {
@@ -2069,6 +2290,11 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                 if (mainPanel) mainPanel.style.display = 'flex';
                 if (actionsPanel) actionsPanel.style.display = 'flex';
                 if (pageFooter) pageFooter.style.display = 'flex';
+
+                // Populate hint modal data from all hints
+                if (mission && mission.allHints && mission.allHints.length > 0) {
+                    allAvailableHints = mission.allHints;
+                }
 
                 if (page === 1) {
                     page1Layout.style.display = 'flex';
