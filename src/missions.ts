@@ -70,6 +70,8 @@ export interface Mission {
     tier?: 1 | 2 | 3;
     /** 1-indexed line number where the error was detected */
     errorLineNumber?: number;
+    /** Tier 2 Multi-Error Regions */
+    errorRegions?: { lineStart: number; lineEnd: number; meaning: string }[];
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -295,6 +297,34 @@ export async function matchErrorToMission(event: DiagnosticEvent): Promise<Missi
     } catch (e) {
         LOG.appendLine(`[matchErrorToMission] Tier classification failed (non-fatal): ${e}`);
         mission.tier = 2; // safe default
+    }
+
+    // ── Tier 2 Multi-Region Analysis ──────────────────────────────────────────
+    if (mission.tier === 2) {
+        try {
+            const ANALYZE_ERRORS_URL = 'http://127.0.0.1:8000/v1/missions/analyze-errors';
+            const analyzeResp = await fetch(ANALYZE_ERRORS_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    language: ctx.language,
+                    errorCode: ctx.errorCode,
+                    message: ctx.diagnosticMessage,
+                    sourceCode: ctx.sourceCode,
+                    lineNumber: event.lineNumber,
+                    terminalOutput: ctx.terminalOutput,
+                }),
+            });
+            if (analyzeResp.ok) {
+                const data = await analyzeResp.json() as { regions: any[] };
+                if (data.regions && data.regions.length > 0) {
+                    mission.errorRegions = data.regions;
+                    LOG.appendLine(`[matchErrorToMission] Tier 2 analyze-errors returned ${data.regions.length} regions`);
+                }
+            }
+        } catch (e) {
+            LOG.appendLine(`[matchErrorToMission] Tier 2 analyze-errors failed: ${e}`);
+        }
     }
 
     return mission;

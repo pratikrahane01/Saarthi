@@ -627,3 +627,103 @@ async def evaluate_hypothesis_llm(
         logger.error("Failed to evaluate hypothesis: %s", e)
         return {"status": "PASS", "nudge": ""}
 
+
+# ---------------------------------------------------------------------------
+# Multi-Error Region Analysis (Tier 2)
+# ---------------------------------------------------------------------------
+
+from backend.models.schemas import ErrorRegion
+
+def analyze_error_regions(
+    language: str,
+    error_code: str,
+    message: str,
+    source_code: str,
+    line_number: int,
+    terminal_output: str
+) -> list[ErrorRegion]:
+    """
+    Analyzes the source code to identify 2-4 suspect regions where the
+    error could originate. Returns a list of ErrorRegion objects.
+    """
+    api_key = os.environ.get("GROQ_API_KEY1") or os.environ.get("GROQ_API_KEY")
+    
+    # Base fallback if API is unavailable or fails
+    fallback_region = ErrorRegion(
+        lineStart=line_number if line_number > 0 else 1,
+        lineEnd=line_number if line_number > 0 else 1,
+        meaning=f"The primary error was reported here: {message}. Look closely at the logic."
+    )
+
+    if not api_key or Groq is None:
+        logger.warning("Groq API key not found — returning fallback error region.")
+        return [fallback_region]
+
+    client = Groq(api_key=api_key)
+    
+    clean_source = strip_comments(source_code, language) if source_code else ""
+    
+    system_prompt = (
+        "You are an expert debugging assistant.\n"
+        "Your task is to analyze a source code file and an error message, and identify "
+        "2 to 4 suspect regions (line ranges) where the root cause of the error could be.\n\n"
+        "RULES:\n"
+        "1. Return 2 to 4 suspect regions.\n"
+        "2. For each region, provide `lineStart`, `lineEnd`, and a `meaning`.\n"
+        "3. `meaning` MUST be a plain-English 1-2 sentence explanation of what might be wrong at that location. "
+        "Do NOT reveal the exact fix, just explain the potential problem.\n"
+        "4. Output MUST be valid JSON matching this schema:\n"
+        "{\n"
+        "  \"regions\": [\n"
+        "    { \"lineStart\": int, \"lineEnd\": int, \"meaning\": str }\n"
+        "  ]\n"
+        "}\n\n"
+        "Do NOT wrap the JSON in markdown blocks. Return JSON only."
+    )
+    
+    terminal_part = f"\nTerminal Output:\n{terminal_output[:1000]}" if terminal_output else ""
+    line_part = f"\nError reported on line: {line_number}" if line_number > 0 else ""
+    
+    user_prompt = (
+        f"Language: {language}\n"
+        f"Error Type: {error_code}\n"
+        f"Error Message: {message}"
+        f"{line_part}"
+        f"{terminal_part}\n"
+        f"Source Code:\n```\n{clean_source[:4000]}\n```"
+    )
+
+    try:
+        response = client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.3,
+            max_tokens=600
+        )
+        
+        raw_content = response.choices[0].message.content
+        if not raw_content:
+            raise ValueError("Empty Groq response")
+            
+        data = json.loads(raw_content)
+        regions_data = data.get("regions", [])
+        
+        if not isinstance(regions_data, list) or len(regions_data) == 0:
+            raise ValueError("Invalid regions format in response")
+            
+        regions = []
+        for r in regions_data:
+            start = int(r.get("lineStart", 1))
+            end = int(r.get("lineEnd", start))
+            meaning = str(r.get("meaning", "Inspect this region for potential logic errors."))
+            regions.append(ErrorRegion(lineStart=start, lineEnd=end, meaning=meaning))
+            
+        return regions[:4]  # cap at 4 regions max
+        
+    except Exception as e:
+        logger.error("Failed to analyze error regions: %s", e)
+        return [fallback_region]

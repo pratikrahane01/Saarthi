@@ -12,6 +12,9 @@ from .schemas import (
     RitualContextRequest,
     RitualContextResponse,
     ErrorLine,
+    AnalyzeErrorsRequest,
+    ErrorRegion,
+    AnalyzeErrorsResponse,
 )
 
 __all__ = [
@@ -25,4 +28,7 @@ __all__ = [
     "RitualContextRequest",
     "RitualContextResponse",
     "ErrorLine",
+    "AnalyzeErrorsRequest",
+    "ErrorRegion",
+    "AnalyzeErrorsResponse",
 ]

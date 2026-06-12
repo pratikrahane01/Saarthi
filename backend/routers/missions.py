@@ -477,6 +477,41 @@ async def evaluate_hypothesis(
         nudge=result["nudge"],
     )
 
+# ---------------------------------------------------------------------------
+# POST /v1/missions/analyze-errors
+# ---------------------------------------------------------------------------
+
+from backend.models.schemas import AnalyzeErrorsRequest, AnalyzeErrorsResponse
+
+@router.post(
+    "/analyze-errors",
+    response_model=AnalyzeErrorsResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Analyze full file to identify suspect error regions",
+)
+async def analyze_errors(
+    request_body: AnalyzeErrorsRequest,
+    request: Request,
+) -> AnalyzeErrorsResponse:
+    request_id = _request_id(request)
+    logger.info(
+        "[%s] POST /analyze-errors | language=%r  errorCode=%r",
+        request_id,
+        request_body.language,
+        request_body.errorCode,
+    )
+
+    regions = groq_service.analyze_error_regions(
+        language=request_body.language,
+        error_code=request_body.errorCode,
+        message=request_body.message,
+        source_code=request_body.sourceCode,
+        line_number=request_body.lineNumber,
+        terminal_output=request_body.terminalOutput,
+    )
+
+    return AnalyzeErrorsResponse(regions=regions)
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers

@@ -203,6 +203,21 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                 this.reset();
                 break;
 
+            case 'SUBMIT_TIER2_ATTEMPT':
+                this._onSubmitTier2Attempt(message.hypothesis);
+                break;
+
+            case 'USE_TIER2_HINT':
+                if (this._hearts > 1) {
+                    this._hearts--;
+                    this._postState();
+                }
+                break;
+
+            case 'GO_TO_LINE':
+                this._goToLine(message.line);
+                break;
+
             default:
                 console.log('Zero-Magic Sidebar: Unknown message type', message.type);
         }
@@ -239,6 +254,41 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
         const state = await advanceStep(globalContext, this._currentMission.id, response);
         this._ritualState = state;
         await this._onRequestSolution();
+    }
+    
+    private async _onSubmitTier2Attempt(hypothesis: string) {
+        if (!this._currentMission || this._isTesting) return;
+
+        this._isTesting = true;
+        this.postMessage({ type: 'HYPOTHESIS_FEEDBACK', status: 'LOADING' });
+
+        if (hypothesis && hypothesis.trim().length > 0) {
+            evaluateHypothesisAPI(
+                hypothesis,
+                this._currentMission.originalMessage || this._currentMission.originalErrorCode,
+                this._currentMission.errorLineNumber?.toString() || ""
+            ).then(res => {
+                this.postMessage({ type: 'HYPOTHESIS_FEEDBACK', status: res.status, nudge: res.nudge });
+            }).catch(console.error);
+        }
+
+        this._isTesting = false; 
+        await this._retrigger();
+    }
+
+    private async _goToLine(line: number) {
+        if (this._currentMission && this._currentMission.targetUri) {
+            const uri = vscode.Uri.parse(this._currentMission.targetUri);
+            try {
+                const doc = await vscode.workspace.openTextDocument(uri);
+                const editor = await vscode.window.showTextDocument(doc);
+                const range = new vscode.Range(line - 1, 0, line - 1, 0);
+                editor.selection = new vscode.Selection(range.start, range.end);
+                editor.revealRange(range, vscode.TextEditorRevealType.InCenter);
+            } catch (e) {
+                console.error("Failed to jump to line:", e);
+            }
+        }
     }
     
     private async _onSkipRitual() {
@@ -542,7 +592,11 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                     this._currentState = 'FAILED';
                     await this._saveStepHistory(false);
                 } else {
-                    this._currentState = 'FAILED';
+                    if (mission.tier === 2) {
+                        this._currentState = 'QUESTIONING';
+                    } else {
+                        this._currentState = 'FAILED';
+                    }
                 }
                 this._postState();
             }
@@ -604,6 +658,9 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                 description: this._currentMission.description,
                 socraticQuestion: this._currentMission.socraticQuestion,
                 hints: this._currentMission.hints.slice(0, this._revealedHints),
+                tier: this._currentMission.tier ?? 2,
+                errorLineNumber: this._currentMission.errorLineNumber ?? null,
+                errorRegions: this._currentMission.errorRegions ?? [],
             } : null,
             attempts: this._attempts,
             totalHints: this._currentMission?.hints.length ?? 0,
@@ -1446,23 +1503,92 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                     </div>
                 </div>
                 
-                <!-- Page 1 Paper Layout -->
-                <div id="page-1-layout" style="display: flex; flex-direction: column; gap: 16px; margin-top: 8px; display: none;">
-                    <!-- Error summary card -->
-                    <div class="ritual-card ritual-card-info">
-                        <div class="ritual-card-title">MEANING</div>
-                        <div class="question-text" id="explanation-error-summary">Loading error summary...</div>
+                <!-- Page 1 Paper Layout (Tier 2 wireframe-accurate) -->
+                <div id="page-1-layout" style="display: flex; flex-direction: column; gap: 0; margin-top: 12px;">
+
+                    <!-- ───── MEANING CARD ───── -->
+                    <div id="meaning-card" style="
+                        border: 1px solid rgba(255,255,255,0.08);
+                        border-radius: 14px;
+                        overflow: hidden;
+                        background: rgba(255,255,255,0.03);
+                    ">
+                        <!-- Card header row: "Meaning" label + < [line#] > error navigator -->
+                        <div style="
+                            display: flex;
+                            justify-content: space-between;
+                            align-items: center;
+                            padding: 10px 14px 8px;
+                            border-bottom: 1px solid rgba(255,255,255,0.06);
+                        ">
+                            <span style="font-size:0.78rem; font-weight:700; letter-spacing:0.08em; text-transform:uppercase; color: rgba(255,255,255,0.45);">Meaning</span>
+                            <!-- Error line navigator: < [12] > -->
+                            <div id="error-line-navigator" style="
+                                display: none;
+                                align-items: center;
+                                gap: 0;
+                                background: rgba(167,139,250,0.08);
+                                border: 1px solid rgba(167,139,250,0.25);
+                                border-radius: 8px;
+                                overflow: hidden;
+                            ">
+                                <button id="btn-error-prev" title="Previous error" style="
+                                    background: none;
+                                    border: none;
+                                    border-right: 1px solid rgba(167,139,250,0.2);
+                                    color: #a78bfa;
+                                    font-family: 'DM Mono', monospace;
+                                    font-size: 0.85rem;
+                                    padding: 3px 8px;
+                                    cursor: pointer;
+                                    line-height: 1;
+                                    transition: background 0.15s;
+                                ">&lt;</button>
+                                <span id="error-line-display" style="
+                                    color: #a78bfa;
+                                    font-family: 'DM Mono', monospace;
+                                    font-size: 0.8rem;
+                                    padding: 3px 8px;
+                                    min-width: 28px;
+                                    text-align: center;
+                                    letter-spacing: 0.04em;
+                                    cursor: default;
+                                    user-select: none;
+                                ">–</span>
+                                <button id="btn-error-next" title="Next error" style="
+                                    background: none;
+                                    border: none;
+                                    border-left: 1px solid rgba(167,139,250,0.2);
+                                    color: #a78bfa;
+                                    font-family: 'DM Mono', monospace;
+                                    font-size: 0.85rem;
+                                    padding: 3px 8px;
+                                    cursor: pointer;
+                                    line-height: 1;
+                                    transition: background 0.15s;
+                                ">&gt;</button>
+                            </div>
+                        </div>
+                        <!-- Card body: error description -->
+                        <div style="padding: 12px 14px 14px;">
+                            <div id="explanation-error-summary" style="
+                                font-size: 0.88rem;
+                                line-height: 1.6;
+                                color: rgba(255,255,255,0.75);
+                                min-height: 80px;
+                            ">Loading...</div>
+                        </div>
                     </div>
 
-                    <!-- Suspect lines card -->
-                    <div class="ritual-card ritual-card-warning">
+                    <!-- Tier 3 Location card (hidden for tier 2) -->
+                    <div class="ritual-card ritual-card-warning" id="location-card" style="margin-top:12px;">
                         <div class="ritual-card-title ritual-card-title-warning">LOCATION</div>
                         <input type="text" id="explanation-line-input" class="ritual-textarea" placeholder="Line #" style="width: 100px; padding: 6px; margin-top: 4px; box-sizing: border-box;">
                         <div class="ritual-subtitle" style="margin-top: 8px;">Check the terminal and analyze the code to find the exact line.</div>
                     </div>
 
-                    <!-- Hypothesis input -->
-                    <div>
+                    <!-- Tier 3 Hypothesis input (hidden for tier 2) -->
+                    <div id="hypothesis-section" style="margin-top:14px;">
                         <div class="ritual-card-title" style="margin-bottom: 4px; color: var(--vscode-foreground);">HYPOTHESIS</div>
                         <div class="ritual-subtitle" style="margin-bottom: 10px;">
                             <b class="ritual-highlight" id="explanation-question-text">Before you can fix the error...</b><br>
@@ -1474,9 +1600,119 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                             <button class="btn btn-solid btn-blue" id="btn-explanation-submit" style="width: auto; padding: 0 18px; opacity: 0.5;" disabled>Submit &amp; Start &rarr;</button>
                         </div>
                     </div>
-                    
+
+                    <!-- ───── TIER 2: THINK CRITICALLY ───── -->
+                    <div id="tier2-hypothesis-section" style="display: none; margin-top: 14px;">
+                        <div style="
+                            border: 1px solid rgba(255,255,255,0.08);
+                            border-radius: 14px;
+                            overflow: hidden;
+                            background: rgba(255,255,255,0.03);
+                        ">
+                            <!-- Card header row -->
+                            <div style="
+                                display: flex;
+                                justify-content: space-between;
+                                align-items: center;
+                                padding: 10px 14px 8px;
+                                border-bottom: 1px solid rgba(255,255,255,0.06);
+                            ">
+                                <span style="font-size:0.78rem; font-weight:700; letter-spacing:0.08em; text-transform:uppercase; color: rgba(255,255,255,0.45);">Think critically</span>
+                            </div>
+                            
+                            <!-- Card body -->
+                            <div style="padding: 12px 14px 14px;">
+                                <textarea
+                                    id="tier2-hypothesis-input"
+                                    rows="3"
+                                    placeholder="Best guess"
+                                    style="
+                                        width: 100%;
+                                        box-sizing: border-box;
+                                        background: transparent;
+                                        border: none;
+                                        color: rgba(255,255,255,0.8);
+                                        font-family: 'DM Mono', monospace;
+                                        font-size: 0.85rem;
+                                        line-height: 1.5;
+                                        resize: vertical;
+                                        outline: none;
+                                    "
+                                ></textarea>
+                            </div>
+                        </div>
+                        <!-- Bottom row: Hint square + Submit pill -->
+                        <div style="display: flex; gap: 10px; margin-top: 10px; align-items: center;">
+                            <button
+                                id="btn-tier2-hint"
+                                title="Get a hint (costs 1 heart)"
+                                style="
+                                    width: 42px;
+                                    height: 42px;
+                                    flex-shrink: 0;
+                                    border-radius: 10px;
+                                    border: 1px solid rgba(244,63,94,0.35);
+                                    background: rgba(244,63,94,0.07);
+                                    color: #f43f5e;
+                                    font-size: 1.1rem;
+                                    cursor: pointer;
+                                    display: flex;
+                                    align-items: center;
+                                    justify-content: center;
+                                    transition: background 0.2s, transform 0.15s;
+                                "
+                            >💡</button>
+                            <button
+                                id="btn-tier2-submit"
+                                style="
+                                    flex: 1;
+                                    height: 42px;
+                                    border-radius: 10px;
+                                    border: none;
+                                    background: rgba(255,255,255,0.9);
+                                    color: #09090b;
+                                    font-weight: 700;
+                                    font-size: 0.9rem;
+                                    cursor: pointer;
+                                    letter-spacing: 0.03em;
+                                    transition: background 0.2s, transform 0.15s;
+                                "
+                            >Submit</button>
+                        </div>
+                    </div>
+
+                    <!-- ───── TIER 2: EXPLANATION ROUNDS (Round 2 & 3) ───── -->
+                    <div id="tier2-explanation-section" style="display: none; margin-top: 14px;">
+                        <div style="
+                            border: 1px solid rgba(56,189,248,0.2);
+                            border-radius: 12px;
+                            overflow: hidden;
+                            background: rgba(56,189,248,0.04);
+                        ">
+                            <div style="padding: 8px 14px; border-bottom: 1px solid rgba(56,189,248,0.15); font-size:0.75rem; font-weight:700; letter-spacing:0.08em; text-transform:uppercase; color: #38bdf8;">Explanation</div>
+                            <div id="tier2-explanation-text" style="padding: 12px 14px; font-size: 0.88rem; line-height: 1.6; color: rgba(255,255,255,0.75);">Loading...</div>
+                        </div>
+                        <button
+                            id="btn-tier2-resubmit"
+                            style="
+                                width: 100%;
+                                height: 42px;
+                                border-radius: 10px;
+                                border: none;
+                                background: rgba(255,255,255,0.9);
+                                color: #09090b;
+                                font-weight: 700;
+                                font-size: 0.9rem;
+                                cursor: pointer;
+                                margin-top: 10px;
+                                letter-spacing: 0.03em;
+                                transition: background 0.2s, transform 0.15s;
+                            "
+                        >Submit Fix</button>
+                    </div>
+
                     <!-- Skip link -->
-                    <div id="ritual-skip-container" style="display: none; text-align: center; margin-top: 4px;">
+                    <div id="ritual-skip-container" style="display: none; text-align: center; margin-top: 8px;">
                         <a href="#" id="link-ritual-skip" class="ritual-skip-link">Skip ritual (Rank 3+)</a>
                     </div>
                 </div>
@@ -1498,30 +1734,7 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                 <div class="runtime-summary" id="runtime-summary">Runtime failure detected — mission questions target this specific error.</div>
             </div>
 
-            <!-- NAVIGATION PANEL (Actions) -->
-            <div class="actions-panel">
-                <div class="section-header">Actions</div>
-                
-                <!-- Hint + Solution Actions -->
-                <div class="action-row" id="action-row">
-                    <button class="btn btn-outline btn-green" id="btn-hint">> /hint</button>
-                    <button class="btn btn-solid btn-blue" id="btn-action">> /explain</button>
-                </div>
-
-                <!-- Page 2 extra actions -->
-                <div class="extra-actions" id="extra-actions" style="display: none;">
-                    <button class="btn btn-outline" id="btn-resubmit">> /resubmit</button>
-                    <button class="btn btn-outline" id="btn-more-explanation">> /more_details</button>
-                </div>
-
-                <!-- Page 3 result box -->
-                <div class="result-box" id="result-box" style="display: none;"></div>
-
-                <!-- Navigation navigation-row -->
-                <div class="action-row">
-                    <button class="btn btn-outline" id="btn-nav">> /navigate_errors</button>
-                </div>
-            </div>
+            <!-- Actions Section Removed per request -->
 
             <!-- Page Indicator at the bottom -->
             <div class="page-footer" style="display: flex; flex-direction: column; align-items: center; gap: 8px; margin-top: auto; font-size: 0.8rem; color: rgba(166, 172, 205, 0.5); border-top: 1px dashed rgba(166, 172, 205, 0.1); padding-top: 12px; padding-bottom: 8px;">
@@ -1546,6 +1759,30 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
     <script nonce="${nonce}">
         const vscode = acquireVsCodeApi();
         let canProceedAnyway = false;
+        
+        let currentRegionIndex = 0;
+        let regionHypotheses = [];
+        let currentErrorRegions = [];
+
+        function renderCurrentRegion() {
+            if (!currentErrorRegions || currentErrorRegions.length === 0) return;
+            const region = currentErrorRegions[currentRegionIndex];
+            const errorLineDisplay = document.getElementById('error-line-display');
+            const expSummary = document.getElementById('explanation-error-summary');
+            const hypInput = document.getElementById('tier2-hypothesis-input');
+            
+            if (errorLineDisplay) {
+                errorLineDisplay.textContent = region.lineStart === region.lineEnd ? '#L' + String(region.lineStart) : '#L' + String(region.lineStart) + '-' + String(region.lineEnd);
+            }
+            if (expSummary) {
+                expSummary.textContent = region.meaning;
+            }
+            if (hypInput) {
+                hypInput.value = regionHypotheses[currentRegionIndex] || '';
+            }
+            
+            vscode.postMessage({ type: 'GO_TO_LINE', line: region.lineStart });
+        }
 
         const loadingOverlay = document.getElementById('loading-overlay');
         const loadingText = document.getElementById('loading-text');
@@ -1578,14 +1815,74 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             vscode.postMessage({ type: 'REQUEST_STATE' });
         });
 
+        // ── Error line navigator (prev / next) ──────────────────────────────────
+        const btnErrorPrev = document.getElementById('btn-error-prev');
+        const btnErrorNext = document.getElementById('btn-error-next');
+        if (btnErrorPrev) {
+            btnErrorPrev.addEventListener('click', () => {
+                if (currentErrorRegions && currentErrorRegions.length > 0) {
+                    const hypInput = document.getElementById('tier2-hypothesis-input');
+                    if (hypInput) regionHypotheses[currentRegionIndex] = hypInput.value;
+                    currentRegionIndex = (currentRegionIndex - 1 + currentErrorRegions.length) % currentErrorRegions.length;
+                    renderCurrentRegion();
+                } else {
+                    vscode.postMessage({ type: 'NAVIGATE_ERROR', direction: 'prev' });
+                }
+            });
+        }
+        if (btnErrorNext) {
+            btnErrorNext.addEventListener('click', () => {
+                if (currentErrorRegions && currentErrorRegions.length > 0) {
+                    const hypInput = document.getElementById('tier2-hypothesis-input');
+                    if (hypInput) regionHypotheses[currentRegionIndex] = hypInput.value;
+                    currentRegionIndex = (currentRegionIndex + 1) % currentErrorRegions.length;
+                    renderCurrentRegion();
+                } else {
+                    vscode.postMessage({ type: 'NAVIGATE_ERROR', direction: 'next' });
+                }
+            });
+        }
+        // ──────────────────────────────────────────────────────────────────────
+
+        // ── Tier 2 event listeners ─────────────────────────────────────────────
+
+        const btnTier2Submit = document.getElementById('btn-tier2-submit');
+        if (btnTier2Submit) {
+            btnTier2Submit.addEventListener('click', () => {
+                const hypInput = document.getElementById('tier2-hypothesis-input');
+                if (currentErrorRegions && currentErrorRegions.length > 0) {
+                    if (hypInput) regionHypotheses[currentRegionIndex] = hypInput.value;
+                    const combined = currentErrorRegions.map((r, i) => 'Region ' + r.lineStart + ': ' + (regionHypotheses[i] || 'No guess')).join('\\n');
+                    vscode.postMessage({ type: 'SUBMIT_TIER2_ATTEMPT', hypothesis: combined });
+                } else {
+                    const hypVal = hypInput ? hypInput.value : '';
+                    vscode.postMessage({ type: 'SUBMIT_TIER2_ATTEMPT', hypothesis: hypVal });
+                }
+            });
+        }
+
+        const btnTier2Resubmit = document.getElementById('btn-tier2-resubmit');
+        if (btnTier2Resubmit) {
+            btnTier2Resubmit.addEventListener('click', () => {
+                vscode.postMessage({ type: 'SUBMIT_TIER2_ATTEMPT', hypothesis: '' });
+            });
+        }
+
+        const btnTier2Hint = document.getElementById('btn-tier2-hint');
+        if (btnTier2Hint) {
+            btnTier2Hint.addEventListener('click', () => {
+                vscode.postMessage({ type: 'USE_TIER2_HINT' });
+            });
+        }
+        // ──────────────────────────────────────────────────────────────────────
 
         const btnHint = document.getElementById('btn-hint');
-        btnHint.addEventListener('click', () => {
+        if (btnHint) btnHint.addEventListener('click', () => {
             vscode.postMessage({ type: 'REQUEST_HINT' });
         });
 
         const btnAction = document.getElementById('btn-action');
-        btnAction.addEventListener('click', () => {
+        if (btnAction) btnAction.addEventListener('click', () => {
             const text = btnAction.textContent || "";
             const isSubmit = text.indexOf('submit') !== -1 || text.indexOf('Submit') !== -1;
             if (isSubmit) {
@@ -1600,14 +1897,14 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
         });
 
         const btnResubmit = document.getElementById('btn-resubmit');
-        btnResubmit.addEventListener('click', () => {
+        if (btnResubmit) btnResubmit.addEventListener('click', () => {
             runLoader(1500, "Running diagnostic verification...", () => {
                 vscode.postMessage({ type: 'SUBMIT_ANSWER' });
             });
         });
 
         const btnMoreExplanation = document.getElementById('btn-more-explanation');
-        btnMoreExplanation.addEventListener('click', () => {
+        if (btnMoreExplanation) btnMoreExplanation.addEventListener('click', () => {
             runLoader(1500, "Extracting more details...", () => {
                 vscode.postMessage({ type: 'MORE_EXPLANATION' });
             });
@@ -1660,7 +1957,7 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
 
         let navDirection = 'next';
         const btnNav = document.getElementById('btn-nav');
-        btnNav.addEventListener('click', () => {
+        if (btnNav) btnNav.addEventListener('click', () => {
             vscode.postMessage({ type: 'NAVIGATE_ERROR', direction: navDirection });
             navDirection = navDirection === 'next' ? 'prev' : 'next';
         });
@@ -1681,7 +1978,7 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             } catch (err) {}
         }
 
-        themeSelect.value = activeTheme;
+        if (themeSelect) themeSelect.value = activeTheme;
         document.body.classList.remove('theme-startup', 'theme-native');
         if (activeTheme === 'startup') {
             document.body.classList.add('theme-startup');
@@ -1689,23 +1986,25 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
             document.body.classList.add('theme-native');
         }
 
-        themeSelect.addEventListener('change', (e) => {
-            const theme = e.target.value;
-            document.body.classList.remove('theme-startup', 'theme-native');
-            if (theme === 'startup') {
-                document.body.classList.add('theme-startup');
-            } else if (theme === 'native') {
-                document.body.classList.add('theme-native');
-            }
-            try {
-                const currentState = vscode.getState() || {};
-                currentState.theme = theme;
-                vscode.setState(currentState);
-            } catch (err) {}
-            try {
-                localStorage.setItem('socratic-theme', theme);
-            } catch (err) {}
-        });
+        if (themeSelect) {
+            themeSelect.addEventListener('change', (e) => {
+                const theme = e.target.value;
+                document.body.classList.remove('theme-startup', 'theme-native');
+                if (theme === 'startup') {
+                    document.body.classList.add('theme-startup');
+                } else if (theme === 'native') {
+                    document.body.classList.add('theme-native');
+                }
+                try {
+                    const currentState = vscode.getState() || {};
+                    currentState.theme = theme;
+                    vscode.setState(currentState);
+                } catch (err) {}
+                try {
+                    localStorage.setItem('socratic-theme', theme);
+                } catch (err) {}
+            });
+        }
 
         window.addEventListener('message', event => {
             const message = event.data;
@@ -1767,9 +2066,9 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                 const page1Layout = document.getElementById('page-1-layout');
                 const questionText = document.getElementById('question-text');
 
-                mainPanel.style.display = 'flex';
-                actionsPanel.style.display = 'flex';
-                pageFooter.style.display = 'flex';
+                if (mainPanel) mainPanel.style.display = 'flex';
+                if (actionsPanel) actionsPanel.style.display = 'flex';
+                if (pageFooter) pageFooter.style.display = 'flex';
 
                 if (page === 1) {
                     page1Layout.style.display = 'flex';
@@ -1789,6 +2088,68 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                         ritualSkipContainer.style.display = 'block';
                     } else {
                         ritualSkipContainer.style.display = 'none';
+                    }
+
+                    // Tier 2 specific UI toggle
+                    const isTier2 = mission && mission.tier === 2;
+                    if (isTier2) {
+                        const locationCard = document.getElementById('location-card');
+                        if (locationCard) locationCard.style.display = 'none';
+
+                        const hypothesisSection = document.getElementById('hypothesis-section');
+                        if (hypothesisSection) hypothesisSection.style.display = 'none';
+
+                        // Show the error line navigator with the current line number
+                        const errorLineNavigator = document.getElementById('error-line-navigator');
+                        const errorLineDisplay = document.getElementById('error-line-display');
+                        if (errorLineNavigator) errorLineNavigator.style.display = 'flex';
+                        
+                        if (mission.errorRegions && mission.errorRegions.length > 0) {
+                            currentErrorRegions = mission.errorRegions;
+                            // Only reset hypothesis arrays if it's a completely new set of regions
+                            if (regionHypotheses.length !== mission.errorRegions.length) {
+                                regionHypotheses = new Array(mission.errorRegions.length).fill('');
+                            }
+                            currentRegionIndex = 0;
+                            renderCurrentRegion();
+                        } else {
+                            currentErrorRegions = [];
+                            if (errorLineDisplay && mission.errorLineNumber) {
+                                errorLineDisplay.textContent = '#L' + String(mission.errorLineNumber);
+                            }
+                        }
+
+                        const t2Hyp = document.getElementById('tier2-hypothesis-section');
+                        const t2Exp = document.getElementById('tier2-explanation-section');
+                        
+                        if (hearts === 3) {
+                            t2Hyp.style.display = 'block';
+                            t2Exp.style.display = 'none';
+                        } else {
+                            t2Hyp.style.display = 'none';
+                            t2Exp.style.display = 'block';
+                            
+                            const expText = document.getElementById('tier2-explanation-text');
+                            if (hearts === 2) {
+                                expText.innerHTML = (mission.hints && mission.hints.length > 0) ? escapeHtml(mission.hints[0]) : 'Look closely at your logic and references.';
+                            } else if (hearts === 1) {
+                                expText.innerHTML = (mission.hints && mission.hints.length > 1) ? escapeHtml(mission.hints[1]) : 'Are you calling the function or assigning the variable correctly?';
+                            }
+                        }
+                    } else {
+                        // Restore Tier 3 state
+                        const locationCard = document.getElementById('location-card');
+                        if (locationCard) locationCard.style.display = 'block';
+                        const hypothesisSection = document.getElementById('hypothesis-section');
+                        if (hypothesisSection) hypothesisSection.style.display = 'block';
+                        
+                        const errorLineNavigator = document.getElementById('error-line-navigator');
+                        if (errorLineNavigator) errorLineNavigator.style.display = 'none';
+                        
+                        const t2Hyp = document.getElementById('tier2-hypothesis-section');
+                        if (t2Hyp) t2Hyp.style.display = 'none';
+                        const t2Exp = document.getElementById('tier2-explanation-section');
+                        if (t2Exp) t2Exp.style.display = 'none';
                     }
                 } else {
                     page1Layout.style.display = 'none';
@@ -1888,49 +2249,50 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                 }
 
                 // Update Buttons
-                btnHint.textContent = '> /hint (' + revealedHints + '/' + totalHints + ')';
+                if (typeof btnHint !== 'undefined' && btnHint) btnHint.textContent = '> /hint (' + revealedHints + '/' + totalHints + ')';
 
                 const actionRow = document.getElementById('action-row');
                 const extraActions = document.getElementById('extra-actions');
                 const resultBox = document.getElementById('result-box');
 
                 if (page === 1) {
-                    actionRow.style.display = 'flex';
-                    extraActions.style.display = 'none';
-                    resultBox.style.display = 'none';
-                    btnAction.textContent = "> /explain";
+                    if (actionRow) actionRow.style.display = 'flex';
+                    if (extraActions) extraActions.style.display = 'none';
+                    if (resultBox) resultBox.style.display = 'none';
+                    if (typeof btnAction !== 'undefined' && btnAction) btnAction.textContent = "> /explain";
                 } else if (page === 2) {
-                    actionRow.style.display = 'flex';
-                    btnAction.textContent = "> /submit";
+                    if (actionRow) actionRow.style.display = 'flex';
+                    if (typeof btnAction !== 'undefined' && btnAction) btnAction.textContent = "> /submit";
                     
                     if (hasFailedSubmit) {
-                        extraActions.style.display = 'flex';
+                        if (extraActions) extraActions.style.display = 'flex';
                     } else {
-                        extraActions.style.display = 'none';
+                        if (extraActions) extraActions.style.display = 'none';
                     }
-                    resultBox.style.display = 'none';
+                    if (resultBox) resultBox.style.display = 'none';
                 } else if (page === 3) {
-                    actionRow.style.display = 'none';
-                    extraActions.style.display = 'none';
-                    resultBox.style.display = 'block';
-
-                    if (hearts > 0) {
-                        resultBox.innerHTML = '<div class="success-banner">' +
-                            '<p>🎉 CONGRATULATIONS! 🎉</p>' +
-                            '<p style="font-size: 0.8rem; margin-top: 6px;">' +
-                                'You solved the challenge with ' + hearts + ' hearts remaining.' +
-                            '</p>' +
-                            '<p style="font-size: 0.75rem; margin-top: 4px;">' +
-                                'Time taken: ' + timeElapsed + 's | Hints used: ' + hintsUsed +
-                            '</p>' +
-                        '</div>';
-                    } else {
-                        resultBox.innerHTML = '<div class="fail-banner">' +
-                            '<p>💔 MISSION FAILED 💔</p>' +
-                            '<p style="font-size: 0.8rem; margin-top: 6px;">' +
-                                'No hearts remaining. Review the core concepts and try again!' +
-                            '</p>' +
-                        '</div>';
+                    if (actionRow) actionRow.style.display = 'none';
+                    if (extraActions) extraActions.style.display = 'none';
+                    if (resultBox) {
+                        resultBox.style.display = 'block';
+                        if (hearts > 0) {
+                            resultBox.innerHTML = '<div class="success-banner">' +
+                                '<p>🎉 CONGRATULATIONS! 🎉</p>' +
+                                '<p style="font-size: 0.8rem; margin-top: 6px;">' +
+                                    'You solved the challenge with ' + hearts + ' hearts remaining.' +
+                                '</p>' +
+                                '<p style="font-size: 0.75rem; margin-top: 4px;">' +
+                                    'Time taken: ' + timeElapsed + 's | Hints used: ' + hintsUsed +
+                                '</p>' +
+                            '</div>';
+                        } else {
+                            resultBox.innerHTML = '<div class="fail-banner">' +
+                                '<p>💔 MISSION FAILED 💔</p>' +
+                                '<p style="font-size: 0.8rem; margin-top: 6px;">' +
+                                    'No hearts remaining. Review the core concepts and try again!' +
+                                '</p>' +
+                            '</div>';
+                        }
                     }
                 }
             }

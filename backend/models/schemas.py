@@ -450,3 +450,44 @@ class EvaluateHypothesisResponse(BaseModel):
     status: str = Field(..., description="PASS, CLOSE, or FAIL")
     nudge: str = Field(..., description="Socratic nudge or empty string")
 
+
+# ---------------------------------------------------------------------------
+# Analyze Errors (Multi-Region) Models
+# ---------------------------------------------------------------------------
+
+class AnalyzeErrorsRequest(BaseModel):
+    """Payload for POST /v1/missions/analyze-errors.
+
+    The extension sends source code + error context after a Tier 2
+    classification. The backend identifies 2-4 suspect regions in the code.
+    """
+    language: str = Field(..., examples=["python"])
+    errorCode: str = Field(..., examples=["TypeError"])
+    message: str = Field(..., examples=["'NoneType' object is not subscriptable"])
+    sourceCode: str = Field(..., description="Complete source code of the active file.")
+    lineNumber: int = Field(default=0, description="Line where the primary error was reported.")
+    terminalOutput: str = Field(default="", description="Terminal output if available.")
+
+
+class ErrorRegion(BaseModel):
+    """A single suspect region in the source code."""
+    lineStart: int = Field(..., description="1-indexed start line of the suspect region.")
+    lineEnd: int = Field(..., description="1-indexed end line (same as lineStart for single-line).")
+    meaning: str = Field(
+        ...,
+        description="Plain-English 1-2 sentence explanation of what might be wrong here.",
+    )
+
+
+class AnalyzeErrorsResponse(BaseModel):
+    """Response from POST /v1/missions/analyze-errors.
+
+    Contains 2-4 suspect regions the student should investigate.
+    """
+    regions: list[ErrorRegion] = Field(
+        ...,
+        description="Ordered list of suspect code regions with explanations.",
+        min_length=1,
+        max_length=6,
+    )
+
