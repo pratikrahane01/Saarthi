@@ -1,0 +1,10 @@
+Active editor URI: file:///c%3A/Users/Admin/Downloads/testi.py
+Active editor fsPath: c:\Users\Admin\Downloads\testi.py
+
+Diagnostic URI: file:///c%3A/Users/Admin/Downloads/testi.py
+Diagnostic fsPath: c:\Users\Admin\Downloads\testi.py
+Diagnostics length: 13
+
+Exact match exists: true
+Path casing differs: false
+Outside current workspace: true

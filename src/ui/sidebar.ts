@@ -777,11 +777,12 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                 try {
                     const qState = getQueueState();
                     if (qState.isActive && qState.bugs.length > 0) {
+                        const currentBug = qState.bugs[qState.currentIndex];
                         return {
-                            currentIndex: qState.initialTotalBugs - qState.bugs.length,
-                            total: qState.initialTotalBugs,
-                            currentLine: qState.bugs[0].lineNumber + 1,
-                            currentErrorType: qState.bugs[0].errorMessage.split(':')[0]
+                            currentIndex: qState.currentIndex,
+                            total: qState.totalBugs,
+                            currentLine: currentBug ? currentBug.errorLineNumber : null,
+                            currentErrorType: currentBug ? currentBug.originalMessage.split(':')[0] : null
                         };
                     }
                 } catch (e) {}
@@ -2359,8 +2360,8 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                     </div>
                 </div>
                 
-                <!-- Page 1 Paper Layout (Tier 2 wireframe-accurate) -->
-                <div id="page-1-layout" style="display: flex; flex-direction: column; gap: 14px; margin-top: 12px; flex: 1; height: 100%; overflow: hidden; padding: 2px 4px; box-sizing: border-box;">
+                <!-- Page 1 Paper Layout (Tier 2 wireframe-accurate) [DEPRECATED BUT KEPT FOR FALLBACK] -->
+                <div id="page-1-layout" style="display: none; flex-direction: column; gap: 14px; margin-top: 12px; flex: 1; height: 100%; overflow: hidden; padding: 2px 4px; box-sizing: border-box;">
 
                     <!-- ───── MEANING CARD ───── -->
                     <div id="meaning-card" class="socratic-card">
@@ -2438,6 +2439,75 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                     <!-- Skip link -->
                     <div id="ritual-skip-container" style="display: none; text-align: center; margin-top: 8px;">
                         <a href="#" id="link-ritual-skip" class="ritual-skip-link">Skip ritual (Rank 3+)</a>
+                    </div>
+                </div>
+
+                <!-- DASHBOARD V2 LAYOUT -->
+                <div id="dashboard-v2-layout" style="display: none; flex-direction: column; gap: 14px; margin-top: 12px; flex: 1; height: 100%; overflow: auto; padding: 2px 4px; box-sizing: border-box;">
+                    <!-- SECTION 2: GOAL -->
+                    <div id="v2-goal-card" class="socratic-card">
+                        <div class="socratic-card-header">
+                            <span class="socratic-card-title">Goal</span>
+                        </div>
+                        <div class="socratic-card-body">
+                            <div id="v2-goal-text" class="socratic-card-text">Loading...</div>
+                        </div>
+                    </div>
+
+                    <!-- SECTION 4: ACTUAL BEHAVIOR -->
+                    <div id="v2-actual-behavior-card" class="socratic-card">
+                        <div class="socratic-card-header">
+                            <span class="socratic-card-title">Actual Behavior</span>
+                        </div>
+                        <div class="socratic-card-body">
+                            <div id="v2-actual-behavior-text" class="socratic-card-text" style="color: #ff5f56; font-family: monospace; font-size: 0.9em; padding: 4px; background: rgba(255, 95, 86, 0.1); border-radius: 4px; white-space: pre-wrap;">Loading...</div>
+                        </div>
+                    </div>
+
+                    <!-- SECTION: OBSERVE -->
+                    <div id="v2-observe-card" class="socratic-card">
+                        <div class="socratic-card-header">
+                            <span class="socratic-card-title">Observe</span>
+                        </div>
+                        <div class="socratic-card-body" id="v2-observe-body" style="font-size: 0.9em;">
+                            Loading...
+                        </div>
+                    </div>
+
+                    <!-- SECTION 5: QUESTION -->
+                    <div id="v2-question-card" class="socratic-card">
+                        <div class="socratic-card-header">
+                            <span class="socratic-card-title">Question</span>
+                        </div>
+                        <div class="socratic-card-body">
+                            <div id="v2-question-text" class="socratic-card-text" style="font-weight: 600; color: #a78bfa;">Loading...</div>
+                        </div>
+                    </div>
+
+                    <!-- SECTION 6: HYPOTHESIS & SECTION 9: SUBMIT -->
+                    <div id="v2-hypothesis-section" style="display: flex; flex-direction: column;">
+                        <div class="socratic-card">
+                            <div class="socratic-card-header">
+                                <span class="socratic-card-title">Hypothesis</span>
+                            </div>
+                            <div class="socratic-card-body">
+                                <textarea id="v2-hypothesis-input" rows="4" placeholder="e.g. I think the loop ends too early..." class="socratic-textarea"></textarea>
+                            </div>
+                        </div>
+                        
+                        <!-- SECTION 7: HINT SYSTEM -->
+                        <div style="display: flex; gap: 10px; margin-top: 10px; align-items: center; justify-content: space-between;">
+                            <div style="display: flex; gap: 8px;">
+                                <button id="btn-v2-hint" title="Get a hint (costs 1 heart)" class="socratic-btn-hint" style="padding: 4px 12px;">💡 Hint (<span id="v2-hints-remaining">3</span> left)</button>
+                            </div>
+                            <button class="socratic-btn-submit" id="btn-v2-submit" style="padding: 4px 24px; font-weight: bold;">&gt; /submit</button>
+                        </div>
+                    </div>
+
+                    <!-- SECTION 8: EXPLANATION (LOCKED) -->
+                    <div id="v2-explanation-card" class="socratic-explanation-card" style="display: none; margin-top: 10px; flex: none;">
+                        <div class="socratic-explanation-header">Root Cause & Explanation</div>
+                        <div id="v2-explanation-text" class="socratic-explanation-text" style="padding: 12px; font-size: 0.9em; white-space: pre-wrap;"></div>
                     </div>
                 </div>
 
@@ -2766,6 +2836,33 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                 vscode.postMessage({ type: 'SUBMIT_RITUAL_STEP', response: combinedVal });
             }
         });
+
+        // Dashboard V2 Bindings
+        const btnV2Submit = document.getElementById('btn-v2-submit');
+        const btnV2Hint = document.getElementById('btn-v2-hint');
+
+        if (btnV2Submit) {
+            btnV2Submit.addEventListener('click', () => {
+                const hypVal = document.getElementById('v2-hypothesis-input').value;
+                if (!hypVal || hypVal.length < 5) {
+                    // Just prompt them to type something, no hard enforcement
+                    const hypEl = document.getElementById('v2-hypothesis-input');
+                    hypEl.style.border = '1px solid #ff5f56';
+                    setTimeout(() => hypEl.style.border = '', 1500);
+                    return;
+                }
+                
+                runLoader(1500, "Validating logic...", () => {
+                    vscode.postMessage({ type: 'SUBMIT_ANSWER' });
+                });
+            });
+        }
+
+        if (btnV2Hint) {
+            btnV2Hint.addEventListener('click', () => {
+                vscode.postMessage({ type: 'REQUEST_HINT' });
+            });
+        }
         
         linkRitualSkip.addEventListener('click', (e) => {
             e.preventDefault();
@@ -2953,7 +3050,7 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
                 }
 
                 if (page === 1) {
-                    page1Layout.style.display = 'flex';
+                    page1Layout.style.display = 'none'; // Replaced by Dashboard V2
                     const page2Layout = document.getElementById('page-2-layout');
                     if (page2Layout) page2Layout.style.display = 'none';
                     questionText.style.display = 'none';
@@ -2976,6 +3073,103 @@ export class SocraticSidebarProvider implements vscode.WebviewViewProvider {
 
                     const hypothesisSection = document.getElementById('hypothesis-section');
                     if (hypothesisSection) hypothesisSection.style.display = 'none';
+
+                    // ── DASHBOARD V2 POPULATION ──
+                    const dashboardV2 = document.getElementById('dashboard-v2-layout');
+                    if (dashboardV2) {
+                        dashboardV2.style.display = 'flex';
+                        
+                        // Goal
+                        const goalText = document.getElementById('v2-goal-text');
+                        if (goalText) {
+                            goalText.textContent = mission ? (mission.description || mission.concept || 'Analyze the context to determine the goal.') : 'Loading...';
+                        }
+                        
+                        // Actual Behavior
+                        const actualText = document.getElementById('v2-actual-behavior-text');
+                        if (actualText && mission) {
+                            let behavior = mission.originalMessage || mission.originalErrorCode;
+                            if (mission.runtimeSummary && mission.runtimeSummary.lastTerminalError) {
+                                behavior += "\\n\\n[Terminal Output]\\n" + mission.runtimeSummary.lastTerminalError.substring(0, 300);
+                            }
+                            actualText.textContent = behavior;
+                        }
+
+                        // Observe
+                        const observeBody = document.getElementById('v2-observe-body');
+                        if (observeBody && mission) {
+                            let isRuntime = mission.runtimeSummary && mission.runtimeSummary.lastTerminalError;
+                            let typeLabel = isRuntime ? "Runtime Error:" : (mission.errorType ? "Compiler Error:" : "Error Type:");
+                            let errorType = mission.errorType || mission.errorCode || "Unknown";
+                            
+                            let lineNum = mission.lineNumber;
+                            if (!lineNum && currentErrorRegions && currentErrorRegions.length > 0) {
+                                lineNum = currentErrorRegions[0].lineStart;
+                            }
+                            
+                            let diagnostic = mission.originalMessage;
+                            if (!diagnostic && isRuntime) {
+                                diagnostic = mission.runtimeSummary.lastTerminalError.split('\\n').filter(l => l.trim().length > 0).pop();
+                            }
+
+                            let html = \`<div style="margin-bottom: 12px;"><div style="color: #a78bfa; margin-bottom: 2px;">\${typeLabel}</div><div style="font-family: monospace;">\${errorType}</div></div>\`;
+                            
+                            if (lineNum) {
+                                html += \`<div style="margin-bottom: 12px;"><div style="color: #a78bfa; margin-bottom: 2px;">Line:</div><div style="font-family: monospace;">\${lineNum}</div></div>\`;
+                            }
+                            
+                            if (diagnostic) {
+                                // Extract just the pure error fact, strip away explanations if any
+                                // Since we're using originalMessage, it's usually factual, e.g. "name 'user_input' is not defined"
+                                let cleanDiag = diagnostic.replace(/^Exception: |^Error: |^.*Error: /g, '').trim();
+                                html += \`<div style="margin-bottom: 0;"><div style="color: #a78bfa; margin-bottom: 2px;">Diagnostic:</div><div style="font-family: monospace; color: #ff5f56;">\${cleanDiag}</div></div>\`;
+                            }
+                            
+                            observeBody.innerHTML = html;
+                        }
+
+                        // Question
+                        const questionText = document.getElementById('v2-question-text');
+                        if (questionText && mission) {
+                            questionText.textContent = mission.socraticQuestion || 'What might be causing this behavior?';
+                        }
+
+                        // Hints & Unlock Logic
+                        const hintsRemainingEl = document.getElementById('v2-hints-remaining');
+                        const hintsRemaining = hearts;
+                        if (hintsRemainingEl) hintsRemainingEl.textContent = hintsRemaining;
+
+                        const btnV2Hint = document.getElementById('btn-v2-hint');
+                        if (btnV2Hint) {
+                            if (hintsRemaining <= 0) {
+                                btnV2Hint.style.opacity = '0.5';
+                                btnV2Hint.style.pointerEvents = 'none';
+                                btnV2Hint.textContent = '💡 Hint (0 left)';
+                            } else {
+                                btnV2Hint.style.opacity = '1';
+                                btnV2Hint.style.pointerEvents = 'auto';
+                                btnV2Hint.textContent = '💡 Hint (' + hintsRemaining + ' left)';
+                            }
+                        }
+
+                        // Locked Explanation
+                        const explanationCard = document.getElementById('v2-explanation-card');
+                        const explanationTextEl = document.getElementById('v2-explanation-text');
+                        
+                        // Unlock if 0 hearts or exhausted attempts (hasFailedSubmit)
+                        if (explanationCard && explanationTextEl) {
+                            if (hearts <= 0 || hasFailedSubmit) {
+                                explanationCard.style.display = 'block';
+                                let exp = (expertSolution && expertSolution.explanation) ? expertSolution.explanation : '';
+                                if (!exp && ritualState && ritualState.errorSummary) {
+                                    exp = ritualState.errorSummary;
+                                }
+                                explanationTextEl.textContent = exp || 'The root cause revolves around the incorrect logic state or algorithm flow.';
+                            } else {
+                                explanationCard.style.display = 'none';
+                            }
+                        }
+                    }
 
                     // ── PHASE 2 — FORCE SINGLE DASHBOARD LAYOUT ──
                     // Show the error line navigator with the current line number

@@ -69,6 +69,8 @@ def generate_dynamic_mission(
     source_code: str = "",
     terminal_output: str = "",
     exit_code: int = -1,
+    broken_line: str | None = None,
+    line_number: int | None = None,
 ) -> DynamicMissionResult:
     """
     Call the Groq API to dynamically generate a Socratic mission based on the
@@ -132,6 +134,42 @@ def generate_dynamic_mission(
         "7. When source code is provided, reference specific line numbers or "
         "identifiers from the code in your question.\n"
         "8. IGNORE all commented out lines of code (such as those starting with #, //, or enclosed in ''' or \"\"\").\n\n"
+    )
+
+    runtime_exceptions = {
+        "NameError", "TypeError", "AttributeError",
+        "IndexError", "KeyError", "ValueError", "ZeroDivisionError"
+    }
+
+    if error_code in runtime_exceptions:
+        system_prompt += (
+            "For runtime missions:\n"
+            "Use ONLY:\n"
+            "- Exact exception type\n"
+            "- Exact line\n"
+            "- Runtime message\n"
+            "Ignore all other source code.\n"
+            "Generate questions that target the exact variable, data type, bounds, or invalid operation causing the runtime exception.\n"
+            "Never generate generic debugging questions.\n"
+            "No generic questions. No theory questions. No dashboard reasoning flow.\n"
+            "Validation Rule: Reject the question if it could apply to multiple error types or talks about theory in general.\n\n"
+        )
+    elif broken_line:
+        system_prompt += (
+            "For Tier 1 syntax missions:\n"
+            "Use ONLY:\n"
+            "- Diagnostic Message\n"
+            "- Broken Line\n"
+            "- Line Number\n"
+            "Ignore all other source code.\n"
+            "Generate questions that target the exact missing token, "
+            "symbol, keyword, bracket, quote, colon, operator, "
+            "or typo reported by the diagnostic.\n"
+            "Never generate generic syntax tutoring questions.\n"
+            "Validation Rule: Reject the question if it could apply to multiple error types, talks about syntax in general, or mentions parser/compiler theory.\n\n"
+        )
+
+    system_prompt += (
         "Return JSON only.\n\n"
         "REQUIRED JSON FORMAT:\n"
         "{\n"
@@ -174,7 +212,12 @@ def generate_dynamic_mission(
             f"Error Code: {error_code}\n"
             f"Error Message: {message}\n"
         )
-        if source_clean:
+        if broken_line:
+            user_prompt += f"Broken Line: {broken_line}\n"
+        if line_number is not None:
+            user_prompt += f"Line Number: {line_number}\n"
+            
+        if source_clean and source_clean != broken_line:
             user_prompt += (
                 f"\n[SOURCE CODE]\n"
                 f"{source_clean[:3000]}\n"

@@ -195,6 +195,55 @@ def _try_regex_classify(
 
 
 # ---------------------------------------------------------------------------
+# Typo Detection Layer
+# ---------------------------------------------------------------------------
+
+def _try_typo_classify(
+    error_code: str,
+    message: str,
+    source_code: str,
+    line_number: int,
+) -> TierClassification | None:
+    if "NameError" not in error_code and "ReferenceError" not in error_code:
+        return None
+
+    # Extract the misspelled symbol from standard error messages
+    # Python: name 'prit' is not defined
+    match = re.search(r"name '([^']+)' is not defined", message)
+    if not match:
+        match = re.search(r"([^']+) is not defined", message) # generic fallback
+
+    if not match:
+        return None
+
+    undefined_symbol = match.group(1)
+
+    import difflib
+
+    # Collect words from source code
+    words = set(re.findall(r'\b[A-Za-z_][A-Za-z0-9_]*\b', source_code))
+    words.discard(undefined_symbol)
+
+    # Add common Python built-ins
+    builtins = {"print", "len", "range", "list", "dict", "set", "int", "str", "float", "bool", "return", "True", "False", "None", "append"}
+    words.update(builtins)
+
+    closest = difflib.get_close_matches(undefined_symbol, list(words), n=1, cutoff=0.7)
+    if closest:
+        flag = _build_error_flag(error_code, message, line_number)
+        logger.debug("TypoDetector → Tier 1 via close match: %r -> %r", undefined_symbol, closest[0])
+        return TierClassification(
+            tier=1,
+            error_flag=flag,
+            pro_tip=f"Tip: Did you mean '{closest[0]}'? Check your spelling.",
+            explanation="",
+            source="typo_detector", # type: ignore
+            api_used="none",
+        )
+
+    return None
+
+# ---------------------------------------------------------------------------
 # LLM classifier (GROQ_API_KEY1)
 # ---------------------------------------------------------------------------
 
@@ -204,27 +253,20 @@ You are an expert programming-error triage system for a Socratic learning tool.
 Your job: analyse the given error context and classify it into exactly ONE tier.
 
 TIER DEFINITIONS:
-  Tier 1 — Syntax / Import / Typo
-    Triggered by: SyntaxError, IndentationError, TabError, ParseError,
-    ModuleNotFoundError, ImportError, missing brackets/quotes/colons,
-    unexpected token, EOF/EOL errors.
-    Characteristics: The file did not execute at all. No runtime output.
-    Fix is always local (one character or one import statement).
+  Tier 1 — Compile-Blocking / Syntax / Typo
+    Principle: The file cannot be successfully parsed, compiled, or executed due to a basic syntax or spelling issue.
+    Triggered by: SyntaxError, ParseError, IndentationError, missing colons/brackets, unterminated strings, Import typos, Keyword typos, Spelling Mistakes, Unresolved symbols caused by simple typos.
+    Characteristics: No deep reasoning required. Fix is local (one character, one import, or spelling correction).
 
-  Tier 2 — Logic / Type / Async (opt-in Deep Dive)
-    Triggered by: TypeError, AttributeError, KeyError, IndexError,
-    NameError (variable not defined at runtime), ValueError,
-    UnboundLocalError, Promise/async resolution errors, "cannot read
-    properties of undefined", incorrect return types.
-    Characteristics: Code executed partially. Error is semantic, not syntactic.
-    Fix requires understanding data flow or variable scope.
+  Tier 2 — Runtime / State / Data Flow
+    Principle: The file parses and executes, but fails during runtime due to state, data flow, or type issues requiring reasoning.
+    Triggered by: TypeError, AttributeError, KeyError, IndexError, ZeroDivisionError, ValueError, NameError (where a variable is genuinely missing or out of scope, not just a typo).
+    Characteristics: Code executed partially. Fix requires understanding data flow, state changes, or variable scope.
 
-  Tier 3 — Runtime / Structural (auto Deep Dive)
-    Triggered by: RecursionError, MemoryError, RuntimeError, multi-line
-    tracebacks with 3+ frames, AssertionError from test runners,
-    infinite loops (exit code -1 or timeout), SegFault, SystemExit.
-    Characteristics: Code executed significantly before crashing.
-    Fix requires understanding architecture or algorithm structure.
+  Tier 3 — Logic / Algorithm / Business Rules
+    Principle: The file executes but produces the wrong output or crashes deeply due to structural algorithm flaws.
+    Triggered by: Logic bugs, Wrong output, Algorithm bugs, Multi-function bugs, Business logic bugs.
+    Characteristics: Fix requires understanding the architecture, algorithm structure, or business logic.
 
 RULES:
   1. Return JSON only — no markdown, no explanation outside the JSON.
@@ -379,6 +421,11 @@ def classify_error_tier(
     regex_result = _try_regex_classify(error_code, message, terminal_output, line_number)
     if regex_result is not None:
         return regex_result
+
+    # ── 1.5 Typo Detection fast-path ───────────────────────────────────────
+    typo_result = _try_typo_classify(error_code, message, source_code, line_number)
+    if typo_result is not None:
+        return typo_result
 
     # ── 2. LLM classification via GROQ_API_KEY1 ───────────────────────────
     llm_result = _call_groq_classifier(

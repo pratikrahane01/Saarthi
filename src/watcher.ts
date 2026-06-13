@@ -65,8 +65,8 @@ export function activateWatcher(context: vscode.ExtensionContext) {
             }
 
             if (matchedMission) {
-                if (matchedMission.tier === 1) {
-                    await showTier1Popup(matchedMission, 0);
+                if (matchedMission.tier === 1 || matchedMission.tier === 2) {
+                    await showInlineFixCoach(matchedMission, 0);
                 } else {
                     await executeMissionHandOff(matchedMission);
                 }
@@ -109,14 +109,7 @@ export function activateWatcher(context: vscode.ExtensionContext) {
         }
     });
 
-    const cmdDashboard = vscode.commands.registerCommand('zeroMagic.inlineCoach.dashboard', async () => {
-        if (activeCoach) {
-            const mission = activeCoach.mission;
-            activeCoach.thread.dispose();
-            activeCoach = null;
-            await executeMissionHandOff(mission);
-        }
-    });
+    // `cmdDashboard` was intentionally removed to isolate Tier 1 popups.
 
     const cmdSubmit = vscode.commands.registerCommand('zeroMagic.inlineCoach.submit', async () => {
         if (!activeCoach) return;
@@ -138,17 +131,20 @@ export function activateWatcher(context: vscode.ExtensionContext) {
                 await advanceBugQueue(50, usedHints);
             }
         } else {
-            console.log(`[AUDIT] inline submit failed: escalating to dashboard`);
-            activeCoach.thread.dispose();
-            activeCoach = null;
-            await executeMissionHandOff(mission);
+            console.log(`[AUDIT] inline submit failed: keeping in popup flow`);
+            vscode.window.showWarningMessage("❌ This bug still exists. Keep trying.");
+            // Do not dispose activeCoach. Allow the user to keep trying.
         }
     });
 
-    context.subscriptions.push(diagnosticListener, codeActionProvider, commandHandler, analyzeWholeFileHandler, inlineCoachController, cmdHint, cmdClose, cmdDashboard, cmdSubmit);
+    const cmdRefreshUI = vscode.commands.registerCommand('zeroMagic.inlineCoach.refreshUI', () => {
+        updateCoachComment();
+    });
+
+    context.subscriptions.push(diagnosticListener, codeActionProvider, commandHandler, analyzeWholeFileHandler, inlineCoachController, cmdHint, cmdClose, cmdSubmit, cmdRefreshUI);
 }
 
-export async function showTier1Popup(mission: Mission, hintIndex: number = 0) {
+export async function showInlineFixCoach(mission: Mission, hintIndex: number = 0) {
     if (hintIndex === 0) {
         console.log(`[AUDIT] inline coach creation: message=${mission.originalMessage}, code=${mission.originalErrorCode}, line=${mission.errorLineNumber}`);
     }
@@ -170,7 +166,7 @@ export async function showTier1Popup(mission: Mission, hintIndex: number = 0) {
     updateCoachComment();
 }
 
-function updateCoachComment() {
+export function updateCoachComment() {
     if (!activeCoach) return;
     const { thread, mission, hintIndex } = activeCoach;
     
@@ -194,12 +190,12 @@ function updateCoachComment() {
     md.appendMarkdown(`---\n\n`);
     
     const hintBtn = hintIndex < maxHints ? `[💡 (${hintIndex}/3)](command:zeroMagic.inlineCoach.hint)` : `[💡 (3/3)](#)`;
-    md.appendMarkdown(`${hintBtn} \\| [Submit](command:zeroMagic.inlineCoach.submit) \\| [Open Dashboard](command:zeroMagic.inlineCoach.dashboard) \\| [Close](command:zeroMagic.inlineCoach.close)`);
+    md.appendMarkdown(`${hintBtn} \\| [Submit](command:zeroMagic.inlineCoach.submit) \\| [Close](command:zeroMagic.inlineCoach.close)`);
 
     let authorName = '💡 FIX COACH';
     const qState = getQueueState();
     if (qState.isActive) {
-        authorName = `💡 FIX COACH (Bug ${qState.currentIndex + 1} of ${qState.bugs.length})`;
+        authorName = `💡 FIX COACH (Bug ${qState.currentIndex + 1} of ${qState.totalBugs})`;
     }
 
     const comment: vscode.Comment = {

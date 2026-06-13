@@ -211,6 +211,8 @@ async def generate_mission(request_body: MissionRequest, request: Request) -> Mi
         source_code=request_body.sourceCode,
         terminal_output=request_body.terminalOutput,
         exit_code=request_body.exitCode,
+        broken_line=request_body.brokenLine,
+        line_number=request_body.lineNumber,
     )
 
     # Create a stable, safe missionId for the extension's file management
@@ -295,8 +297,92 @@ async def reveal_solution(request_body: SolutionRequest, request: Request) -> So
 
 
 # ---------------------------------------------------------------------------
-# POST /v1/missions/analyze-file
+# POST /v1/missions/analyze-all
 # ---------------------------------------------------------------------------
+
+from backend.models.schemas import AnalyzeAllRequest, MissionQueueResponse, UnifiedFinding
+from backend.services.ast_analyzer_service import analyze_ast
+from backend.services.deduplication_service import deduplicate_findings
+
+@router.post(
+    "/analyze-all",
+    response_model=MissionQueueResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Analyze full file using unified AST + LLM pipeline",
+)
+async def analyze_all(request_body: AnalyzeAllRequest, request: Request) -> MissionQueueResponse:
+    request_id = _request_id(request)
+    logger.info(
+        "[%s] POST /analyze-all | language=%r length=%d diagnostics=%d",
+        request_id,
+        request_body.language,
+        len(request_body.fullCode),
+        len(request_body.diagnostics)
+    )
+
+    all_findings: list[UnifiedFinding] = []
+
+    # 1. VS Code Diagnostics
+    TIER_1_KEYWORDS = [
+        'syntax', 'indentation', 'token', 'colon', 'quote', 'bracket', 
+        'parenthesis', 'unexpected eof', 'expected', 'invalid syntax',
+        'nameerror', 'importerror', 'modulenotfounderror',
+        'parseerror', 'referenceerror', 'compile', 'unterminated', 'taberror'
+    ]
+    
+    def is_tier_1(diag):
+        msg = f"{diag.errorCode} {diag.message}".lower()
+        return any(k in msg for k in TIER_1_KEYWORDS)
+
+    file_has_syntax_error = False
+    if request_body.language.lower() == "python":
+        import ast
+        try:
+            ast.parse(request_body.fullCode)
+        except SyntaxError:
+            file_has_syntax_error = True
+
+    has_tier_1 = file_has_syntax_error or any(is_tier_1(diag) for diag in request_body.diagnostics)
+
+    # Note: We NO LONGER map diagnostics into all_findings here.
+    # The Bug Queue frontend (src/bugQueue.ts) already instantly maps Tier 1 
+    # diagnostics using matchErrorToMission (the Lightbulb pipeline).
+    # We only use has_tier_1 to determine whether to skip Tier 2/3 logic analysis.
+
+    # Skip AST and LLM analysis entirely if the file has compile-blocking Tier 1 issues.
+    if not has_tier_1:
+        # 2. AST Analysis (Python only for now)
+        if request_body.language.lower() == "python":
+            ast_findings = analyze_ast(request_body.fullCode)
+            all_findings.extend(ast_findings)
+
+        # 3. LLM Analysis
+        try:
+            dynamic_mission = groq_service.generate_file_mission(
+                language=request_body.language,
+                full_code=request_body.fullCode,
+            )
+            
+            if dynamic_mission and dynamic_mission.concept:
+                all_findings.append(UnifiedFinding(
+                    source="llm",
+                    category="Logic",
+                    confidence=0.85, # Default LLM confidence
+                    severity="Tier 2",
+                    lineNumber=0, # LLM file mission is often global
+                    concept=dynamic_mission.concept,
+                    socraticQuestion=dynamic_mission.questions[0] if dynamic_mission.questions else "What could be improved here?",
+                    hints=dynamic_mission.hints
+                ))
+        except Exception as e:
+            logger.error(f"LLM Analysis failed: {e}")
+
+    # 4. Deduplicate
+    deduplicated = deduplicate_findings(all_findings)
+
+    # 5. Build queue response
+    return MissionQueueResponse(missions=deduplicated)
+
 
 @router.post(
     "/analyze-file",

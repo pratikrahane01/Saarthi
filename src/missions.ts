@@ -28,10 +28,14 @@ interface MissionRequest {
     diagnosticMessage: string;
     /** Complete source code of the active file at time of error. */
     sourceCode: string;
+    /** The exact broken line from the editor for Tier 1 isolation. */
+    brokenLine?: string;
     /** Combined stdout + stderr from the last terminal run (empty string if none). */
     terminalOutput: string;
     /** Exit code of the last terminal process (-1 = no process run this session). */
     exitCode: number;
+    /** 1-indexed line number where the error occurred */
+    lineNumber?: number;
 }
 
 /**
@@ -225,17 +229,21 @@ export async function matchErrorToMission(event: DiagnosticEvent): Promise<Missi
         message:           ctx.diagnosticMessage,
         diagnosticMessage: ctx.diagnosticMessage,
         sourceCode:        ctx.sourceCode,
+        brokenLine:        event.lineText,
         terminalOutput:    ctx.terminalOutput,
         exitCode:          ctx.exitCode,
+        lineNumber:        event.lineNumber + 1,
     };
 
     // FIX: Restrict Tier-1 context to Active Diagnostic Only
     if (tier === 1) {
         requestBody.terminalOutput = '';
         requestBody.exitCode = -1;
-        // Inject line number so the LLM focuses on the exact error line
-        requestBody.message = `[Line ${event.lineNumber + 1}] ${requestBody.message}`;
+        // Rely on brokenLine and lineNumber explicit fields instead of injecting line numbers into the message
+        requestBody.message = event.errorMessage || ctx.diagnosticMessage;
         requestBody.diagnosticMessage = requestBody.message;
+        // Phase 1: Only the broken line should be sent
+        requestBody.sourceCode = event.lineText;
         LOG.appendLine(`[matchErrorToMission] Tier 1 context restricted to line ${event.lineNumber + 1}`);
     }
 
@@ -365,6 +373,12 @@ export async function executeMissionHandOff(mission: Mission) {
         LOG.appendLine(`  Mission : ${mission.title} (${mission.id})`);
         LOG.appendLine(`  Target  : ${mission.targetFilename}`);
         LOG.appendLine(`  Tier    : ${mission.tier ?? 'unknown'}`);
+
+        if (mission.tier === 1 || mission.tier === 2) {
+            console.warn(`[ZERO MAGIC] Tier ${mission.tier} attempted to open dashboard`);
+            LOG.appendLine(`[executeMissionHandOff] Rejected Tier ${mission.tier} mission from dashboard routing.`);
+            return;
+        }
 
         // ── Phase 2: Debug Ritual gate (Tier 2 & 3 only) ──────────────────────────
         // Tier 1 = Syntax/Typo errors → skip the ritual, go straight to mission card.

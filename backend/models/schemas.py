@@ -81,6 +81,11 @@ class MissionRequest(BaseModel):
         ),
     )
 
+    brokenLine: str | None = Field(
+        default=None,
+        description="The exact broken line from the editor for Tier 1 isolation.",
+    )
+
     terminalOutput: str = Field(
         default="",
         description=(
@@ -100,6 +105,11 @@ class MissionRequest(BaseModel):
             "0 means success; any other value indicates failure."
         ),
         examples=[-1, 0, 1],
+    )
+
+    lineNumber: int | None = Field(
+        default=None,
+        description="The line number where the error occurred.",
     )
 
     model_config = {
@@ -289,6 +299,31 @@ class FileAnalysisRequest(BaseModel):
         description="The complete source code of the file.",
         examples=["def main():\n    print('hello world')"],
     )
+
+class DiagnosticInput(BaseModel):
+    lineNumber: int
+    message: str
+    errorCode: str
+    severity: str
+
+class AnalyzeAllRequest(BaseModel):
+    language: str
+    fullCode: str
+    diagnostics: list[DiagnosticInput] = Field(default_factory=list)
+
+class UnifiedFinding(BaseModel):
+    source: str = Field(..., description="The source of the finding: 'diagnostic', 'ast', or 'llm'")
+    category: str = Field(..., description="e.g., 'Syntax', 'Runtime', 'Logic'")
+    confidence: float = Field(..., ge=0.0, le=1.0)
+    severity: str = Field(..., description="e.g., 'Tier 1', 'Tier 2', 'Tier 3'")
+    lineNumber: int = Field(default=0)
+    concept: str = Field(...)
+    socraticQuestion: str = Field(...)
+    hints: list[str] = Field(default_factory=list)
+
+class MissionQueueResponse(BaseModel):
+    missions: list[UnifiedFinding] = Field(...)
+
 
 
 # ---------------------------------------------------------------------------
