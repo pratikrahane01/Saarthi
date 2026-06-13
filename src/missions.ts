@@ -50,6 +50,9 @@ interface MissionResponse {
     hints: string[];
     framework: string;
     hiddenTest: string;
+    solutionBefore?: string;
+    solutionAfter?: string;
+    solutionExplanation?: string;
 }
 
 // ── Public extension-facing interface ────────────────────────────────────────
@@ -78,6 +81,10 @@ export interface Mission {
     errorRegions?: { lineStart: number; lineEnd: number; meaning: string; formattedRange?: string }[];
     /** Validation mode for completion */
     validationMode?: 'diagnostic' | 'logic';
+    /** Educational solution fields (mostly for Tier 1 and Tier 2) */
+    solutionBefore?: string;
+    solutionAfter?: string;
+    solutionExplanation?: string;
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -93,7 +100,7 @@ const FETCH_TIMEOUT_MS   = 8_000;
  * This is intentionally generic — it is only shown when the server is down,
  * never as a replacement for real content.
  */
-function buildFallbackMission(ctx: BuiltContext, errorCode: string): Mission {
+export function buildFallbackMission(ctx: BuiltContext, errorCode: string): Mission {
     return {
         id: 'fallback_offline',
         title: 'Debug Mode (Backend Offline)',
@@ -142,6 +149,9 @@ function mapResponseToMission(response: MissionResponse, ctx: BuiltContext, erro
         originalMessage: ctx.diagnosticMessage,
         runtimeSummary: ContextBuilder.instance.getRuntimeSummary(),
         errorLineNumber: lineNumber,
+        solutionBefore: response.solutionBefore,
+        solutionAfter: response.solutionAfter,
+        solutionExplanation: response.solutionExplanation,
     };
 }
 
@@ -275,9 +285,7 @@ export async function matchErrorToMission(event: DiagnosticEvent): Promise<Missi
         // ECONNREFUSED, AbortError (timeout), DNS failure, etc.
         const msg = networkError instanceof Error ? networkError.message : String(networkError);
         LOG.appendLine(`[matchErrorToMission] ⚠ Network error — backend unreachable: ${msg}`);
-        LOG.appendLine('[matchErrorToMission] Falling back to offline mission.');
-        vscode.window.setStatusBarMessage('⚠️ Zero-Magic: Backend server unreachable — using offline mission.', 6000);
-        return buildFallbackMission(ctx, ctx.errorCode);
+        throw new Error("BACKEND_UNREACHABLE");
     }
 
     // ── Handle HTTP error responses ───────────────────────────────────────────

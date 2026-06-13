@@ -18,7 +18,7 @@ const debounceMap = new Map<string, NodeJS.Timeout>();
 
 export const inlineCoachController = vscode.comments.createCommentController('zeroMagic.fixCoach', '💡 FIX COACH');
 
-export let activeCoach: { thread: vscode.CommentThread, mission: Mission, hintIndex: number } | null = null;
+export let activeCoach: { thread: vscode.CommentThread, mission: Mission, hintIndex: number, solutionVisible: boolean } | null = null;
 
 export function activateWatcher(context: vscode.ExtensionContext) {
     console.log('Zero-Magic: Watcher Module Activated.');
@@ -115,9 +115,36 @@ export function activateWatcher(context: vscode.ExtensionContext) {
         if (!activeCoach) return;
         const mission = activeCoach.mission;
         const targetUri = vscode.Uri.parse(mission.targetUri);
-        const diagnostics = vscode.languages.getDiagnostics(targetUri);
         
-        const originalErrorResolved = !diagnostics.some(d => d.message === mission.originalMessage);
+        const doc = await vscode.workspace.openTextDocument(targetUri);
+        await doc.save();
+
+        let originalErrorResolved = false;
+        
+        await vscode.window.withProgress({
+            location: vscode.ProgressLocation.Notification,
+            title: "Validating Fix...",
+            cancellable: false
+        }, async () => {
+            for (let attempt = 1; attempt <= 6; attempt++) {
+                let diagnostics: vscode.Diagnostic[] = [];
+                for (const [uri, diags] of vscode.languages.getDiagnostics()) {
+                    if (uri.fsPath.toLowerCase() === targetUri.fsPath.toLowerCase()) {
+                        diagnostics.push(...diags);
+                    }
+                }
+                
+                originalErrorResolved = !diagnostics.some(d => d.message === mission.originalMessage);
+                
+                if (originalErrorResolved) {
+                    break;
+                }
+                
+                if (attempt < 6) {
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                }
+            }
+        });
 
         if (originalErrorResolved) {
             await awardXP(globalContext, 'Tier 1 Fix', 50);
@@ -141,7 +168,25 @@ export function activateWatcher(context: vscode.ExtensionContext) {
         updateCoachComment();
     });
 
-    context.subscriptions.push(diagnosticListener, codeActionProvider, commandHandler, analyzeWholeFileHandler, inlineCoachController, cmdHint, cmdClose, cmdSubmit, cmdRefreshUI);
+    const cmdShowSolution = vscode.commands.registerCommand('zeroMagic.inlineCoach.showSolution', () => {
+        if (activeCoach) {
+            activeCoach.solutionVisible = true;
+            updateCoachComment();
+        }
+    });
+
+    context.subscriptions.push(
+        diagnosticListener, 
+        codeActionProvider, 
+        commandHandler, 
+        analyzeWholeFileHandler, 
+        inlineCoachController, 
+        cmdHint, 
+        cmdClose, 
+        cmdSubmit, 
+        cmdRefreshUI,
+        cmdShowSolution
+    );
 }
 
 export async function showInlineFixCoach(mission: Mission, hintIndex: number = 0) {
@@ -162,20 +207,27 @@ export async function showInlineFixCoach(mission: Mission, hintIndex: number = 0
     thread.canReply = false;
     thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
 
-    activeCoach = { thread, mission, hintIndex };
+    activeCoach = { thread, mission, hintIndex, solutionVisible: false };
     updateCoachComment();
 }
 
 export function updateCoachComment() {
     if (!activeCoach) return;
-    const { thread, mission, hintIndex } = activeCoach;
+    const { thread, mission, hintIndex, solutionVisible } = activeCoach;
     
     const question = mission.socraticQuestion || mission.description;
     const hints = mission.hints || [];
     const maxHints = Math.min(hints.length, 3);
 
     let md = new vscode.MarkdownString();
-    md.isTrusted = true;
+    md.isTrusted = { 
+        enabledCommands: [
+            'zeroMagic.inlineCoach.hint', 
+            'zeroMagic.inlineCoach.showSolution', 
+            'zeroMagic.inlineCoach.submit', 
+            'zeroMagic.inlineCoach.close'
+        ] 
+    };
     
     md.appendMarkdown(`**🤔 Question:** ${question}\n\n`);
     
@@ -187,9 +239,25 @@ export function updateCoachComment() {
         md.appendMarkdown(`*Inspect the line carefully. Click 💡 for a hint or Submit when fixed.*\n\n`);
     }
 
-    md.appendMarkdown(`---\n\n`);
+    if (solutionVisible && mission.solutionBefore && mission.solutionAfter && mission.solutionExplanation) {
+        md.appendMarkdown(`────────────────────\n\n`);
+        md.appendMarkdown(`📖 **Solution**\n\n`);
+        md.appendMarkdown(`**Before:**\n\n`);
+        md.appendMarkdown(`\`\`\`${mission.language}\n${mission.solutionBefore}\n\`\`\`\n\n`);
+        md.appendMarkdown(`**After:**\n\n`);
+        md.appendMarkdown(`\`\`\`${mission.language}\n${mission.solutionAfter}\n\`\`\`\n\n`);
+        md.appendMarkdown(`────────────────────\n\n`);
+        md.appendMarkdown(`🧠 **Why This Works**\n\n`);
+        md.appendMarkdown(`${mission.solutionExplanation}\n\n`);
+        md.appendMarkdown(`────────────────────\n\n`);
+    } else if (hintIndex >= maxHints && !solutionVisible && mission.solutionBefore) {
+        md.appendMarkdown(`[Show Solution](command:zeroMagic.inlineCoach.showSolution)\n\n`);
+        md.appendMarkdown(`---\n\n`);
+    } else {
+        md.appendMarkdown(`---\n\n`);
+    }
     
-    const hintBtn = hintIndex < maxHints ? `[💡 (${hintIndex}/3)](command:zeroMagic.inlineCoach.hint)` : `[💡 (3/3)](#)`;
+    const hintBtn = hintIndex < maxHints ? `[💡 (${hintIndex}/3)](command:zeroMagic.inlineCoach.hint)` : `💡 (3/3)`;
     md.appendMarkdown(`${hintBtn} \\| [Submit](command:zeroMagic.inlineCoach.submit) \\| [Close](command:zeroMagic.inlineCoach.close)`);
 
     let authorName = '💡 FIX COACH';

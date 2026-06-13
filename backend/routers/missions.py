@@ -228,6 +228,9 @@ async def generate_mission(request_body: MissionRequest, request: Request) -> Mi
         hints=dynamic_mission.hints,
         framework=test_result.framework,
         hiddenTest=test_result.hidden_test,
+        solutionBefore=dynamic_mission.solutionBefore,
+        solutionAfter=dynamic_mission.solutionAfter,
+        solutionExplanation=dynamic_mission.solutionExplanation,
     )
 
 
@@ -368,7 +371,7 @@ async def analyze_all(request_body: AnalyzeAllRequest, request: Request) -> Miss
                     source="llm",
                     category="Logic",
                     confidence=0.85, # Default LLM confidence
-                    severity="Tier 2",
+                    severity="Tier 3", # FIXED: Logic bugs are strictly Tier 3
                     lineNumber=0, # LLM file mission is often global
                     concept=dynamic_mission.concept,
                     socraticQuestion=dynamic_mission.questions[0] if dynamic_mission.questions else "What could be improved here?",

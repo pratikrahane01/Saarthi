@@ -28,6 +28,9 @@ class DynamicMissionResult:
     concept: str
     questions: list[str]
     hints: list[str]
+    solutionBefore: str | None = None
+    solutionAfter: str | None = None
+    solutionExplanation: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -177,8 +180,15 @@ def generate_dynamic_mission(
         "  \"question\": \"...\",\n"
         "  \"hintLevel1\": \"...\",\n"
         "  \"hintLevel2\": \"...\",\n"
-        "  \"hintLevel3\": \"...\"\n"
-        "}"
+        "  \"hintLevel3\": \"...\",\n"
+        "  \"solutionBefore\": \"...\",\n"
+        "  \"solutionAfter\": \"...\",\n"
+        "  \"solutionExplanation\": \"...\"\n"
+        "}\n\n"
+        "SOLUTION FIELDS INSTRUCTIONS:\n"
+        "- solutionBefore: The exact broken snippet or line from the student's code.\n"
+        "- solutionAfter: The exact corrected snippet or line.\n"
+        "- solutionExplanation: A concise, educational explanation of why the fix resolves the diagnostic. Target the exact syntax or runtime issue.\n"
     )
 
     # Build the user prompt using priority: terminal_output > message > error_code
@@ -258,7 +268,10 @@ def generate_dynamic_mission(
         return DynamicMissionResult(
             concept=data["concept"],
             questions=[data["question"], "Can you identify exactly where the issue occurs in your code?"],
-            hints=[data["hintLevel1"], data["hintLevel2"], data["hintLevel3"]]
+            hints=[data["hintLevel1"], data["hintLevel2"], data["hintLevel3"]],
+            solutionBefore=data.get("solutionBefore"),
+            solutionAfter=data.get("solutionAfter"),
+            solutionExplanation=data.get("solutionExplanation")
         )
 
     except (APIError, json.JSONDecodeError, ValueError) as exc:

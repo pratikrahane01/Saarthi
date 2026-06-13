@@ -239,6 +239,21 @@ class MissionResponse(BaseModel):
         ],
     )
 
+    solutionBefore: str = Field(
+        default="",
+        description="The exact broken snippet or line from the user's code. Empty for Tier 3 logic missions."
+    )
+
+    solutionAfter: str = Field(
+        default="",
+        description="The exact corrected snippet or line. Empty for Tier 3 logic missions."
+    )
+
+    solutionExplanation: str = Field(
+        default="",
+        description="A concise, educational explanation of why the fix resolves the diagnostic. Empty for Tier 3 logic missions."
+    )
+
     model_config = {
         "json_schema_extra": {
             "example": {

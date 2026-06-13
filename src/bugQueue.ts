@@ -11,6 +11,9 @@ export interface UnifiedFinding {
     concept: string;
     socraticQuestion: string;
     hints: string[];
+    solutionBefore?: string;
+    solutionAfter?: string;
+    solutionExplanation?: string;
 }
 
 export interface BugQueueState {
@@ -123,7 +126,10 @@ export function mapUnifiedToMission(uf: UnifiedFinding, document: vscode.TextDoc
         originalMessage: uf.concept,
         tier: uf.severity === 'Tier 1' ? 1 : (uf.severity === 'Tier 3' ? 3 : 2),
         errorLineNumber: uf.lineNumber,
-        validationMode: uf.source === 'diagnostic' ? 'diagnostic' : 'logic'
+        validationMode: uf.source === 'diagnostic' ? 'diagnostic' : 'logic',
+        solutionBefore: uf.solutionBefore,
+        solutionAfter: uf.solutionAfter,
+        solutionExplanation: uf.solutionExplanation
     };
 }
 
@@ -194,6 +200,16 @@ export async function startBugQueue(editor: vscode.TextEditor) {
         console.log(`Diagnostics found after ${diagnostics.length > 0 ? 'stabilization' : 'max attempts'}:`, diagnostics.length);
 
         if (diagnostics.length > 0) {
+            // Deduplicate diagnostics by line number + message
+            const uniqueDiags = new Map<string, vscode.Diagnostic>();
+            for (const d of diagnostics) {
+                const key = `${d.range.start.line}:${d.message}`;
+                if (!uniqueDiags.has(key)) {
+                    uniqueDiags.set(key, d);
+                }
+            }
+            diagnostics = Array.from(uniqueDiags.values());
+
             // Reuse exact same mission generation pipeline used by the Lightbulb flow
             const promises = diagnostics.map(d => matchErrorToMission({
                 filePath: document.uri.fsPath,
@@ -203,13 +219,26 @@ export async function startBugQueue(editor: vscode.TextEditor) {
                 lineNumber: d.range.start.line
             }));
             
-            const results = await Promise.all(promises);
-            localMissions = results.filter((m): m is Mission => m !== null);
-            
-            // Filter out skipped bugs
-            localMissions = localMissions.filter(m => m.tier === 1 || !queueState.skippedBugs.has(m.description));
+            try {
+                const results = await Promise.all(promises);
+                localMissions = results.filter((m): m is Mission => m !== null);
+                
+                // Filter out skipped bugs
+                localMissions = localMissions.filter(m => m.tier === 1 || !queueState.skippedBugs.has(m.description));
+            } catch (err: any) {
+                if (err.message === "BACKEND_UNREACHABLE") {
+                    vscode.window.showErrorMessage("Backend Unavailable: Please ensure the Zero-Magic server is running.");
+                    queueState.isActive = false;
+                    return;
+                }
+                console.error("Error generating missions:", err);
+            }
         }
     });
+
+    if (!queueState.isActive) {
+        return;
+    }
 
     // Count Tiers
     let syntaxCount = localMissions.filter(m => m.tier === 1).length;
@@ -228,6 +257,10 @@ export async function startBugQueue(editor: vscode.TextEditor) {
     queueState.fixedStats = { syntax: 0, runtime: 0, logic: 0 };
     queueState.isActive = true;
     queueState.documentUri = document.uri;
+
+    console.log(`[AUDIT] queueState.bugs.length: ${queueState.bugs.length}`);
+    console.log(`[AUDIT] queueState.initialTotalBugs: ${queueState.totalBugs}`);
+    console.log(`[AUDIT] queueState.currentIndex: ${queueState.currentIndex}`);
 
     // Show Summary Popup
     const action = await vscode.window.showInformationMessage(
@@ -303,17 +336,15 @@ export async function processCurrentBug() {
 
     const mission = queueState.bugs[queueState.currentIndex];
     
-    if (mission.tier === 1 || mission.tier === 2) {
-        // Tier 1 & 2: Open Inline Fix Coach only
-        await showInlineFixCoach(mission, 0);
-        return;
-    }
-
     if (mission.tier === 3) {
         // Tier 3: Open Dashboard
         await executeMissionHandOff(mission);
         return;
     }
+
+    // Tier 1, 2, or offline fallback (undefined): Open Inline Fix Coach
+    await showInlineFixCoach(mission, 0);
+    return;
 }
 
 export async function advanceBugQueue(xpEarned: number, hintsUsed: number, skippedMessage?: string) {
@@ -360,6 +391,10 @@ export async function advanceBugQueue(xpEarned: number, hintsUsed: number, skipp
                 }
             }
 
+            console.log(`[AUDIT] queueState.bugs.length: ${queueState.bugs.length}`);
+            console.log(`[AUDIT] queueState.initialTotalBugs: ${queueState.totalBugs}`);
+            console.log(`[AUDIT] queueState.currentIndex: ${queueState.currentIndex}`);
+
             await processCurrentBug();
         } else {
             queueState.isActive = false;
@@ -377,9 +412,14 @@ export async function abortBugQueue() {
 
 async function finishBugQueue() {
     queueState.isActive = false;
-    vscode.commands.executeCommand('zeroMagic.renderSocraticDashboard', 'MISSION_COMPLETE', {
-        totalXP: queueState.totalXP,
-        totalBugs: queueState.totalBugs,
-        hintsUsed: queueState.hintsUsed
-    });
+    
+    // Dashboard Activation Rule: Dashboard may only activate when mission.tier === 3
+    const hasTier3 = queueState.bugs.some(b => b.tier === 3);
+    if (hasTier3) {
+        vscode.commands.executeCommand('zeroMagic.renderSocraticDashboard', 'MISSION_COMPLETE', {
+            totalXP: queueState.totalXP,
+            totalBugs: queueState.totalBugs,
+            hintsUsed: queueState.hintsUsed
+        });
+    }
 }
