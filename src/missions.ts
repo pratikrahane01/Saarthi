@@ -91,7 +91,7 @@ export interface Mission {
 const BACKEND_URL        = 'http://127.0.0.1:8000/v1/missions/generate-mission';
 const TIER_URL           = 'http://127.0.0.1:8000/v1/missions/classify-tier';
 const RITUAL_CONTEXT_URL = 'http://127.0.0.1:8000/v1/missions/ritual-context';
-const FETCH_TIMEOUT_MS   = 8_000;
+const FETCH_TIMEOUT_MS   = 30_000;
 
 // ── Fallback mock (backend unreachable only) ──────────────────────────────────
 

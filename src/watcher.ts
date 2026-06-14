@@ -134,7 +134,20 @@ export function activateWatcher(context: vscode.ExtensionContext) {
                     }
                 }
                 
-                originalErrorResolved = !diagnostics.some(d => d.message === mission.originalMessage);
+                console.log("[AUDIT] Mission Line:", mission.errorLineNumber);
+                console.log("[AUDIT] Mission Message:", mission.originalMessage);
+                console.log("[AUDIT] Diagnostics Count:", diagnostics.length);
+                
+                diagnostics.forEach(d => {
+                    console.log("[AUDIT] Diagnostic:", d.range.start.line + 1, d.message);
+                });
+
+                const stillBroken = diagnostics.some(
+                    d => Math.abs(d.range.start.line - ((mission.errorLineNumber || 1) - 1)) <= 1
+                );
+                
+                console.log("[AUDIT] Validation Result:", stillBroken);
+                originalErrorResolved = !stillBroken;
                 
                 if (originalErrorResolved) {
                     break;

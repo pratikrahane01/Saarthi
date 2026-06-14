@@ -171,6 +171,7 @@ export async function startBugQueue(editor: vscode.TextEditor) {
     }
     let diagnostics: vscode.Diagnostic[] = [];
     let localMissions: Mission[] = [];
+    let backendFailureDetected = false;
     
     await vscode.window.withProgress({
         location: vscode.ProgressLocation.Notification,
@@ -228,15 +229,18 @@ export async function startBugQueue(editor: vscode.TextEditor) {
             } catch (err: any) {
                 if (err.message === "BACKEND_UNREACHABLE") {
                     vscode.window.showErrorMessage("Backend Unavailable: Please ensure the Zero-Magic server is running.");
-                    queueState.isActive = false;
+                    backendFailureDetected = true;
                     return;
                 }
                 console.error("Error generating missions:", err);
             }
         }
+        console.log(`[AUDIT] diagnostics.length: ${diagnostics.length}`);
+        console.log(`[AUDIT] localMissions.length: ${localMissions.length}`);
     });
 
-    if (!queueState.isActive) {
+    if (backendFailureDetected) {
+        queueState.isActive = false;
         return;
     }
 
@@ -258,10 +262,9 @@ export async function startBugQueue(editor: vscode.TextEditor) {
     queueState.isActive = true;
     queueState.documentUri = document.uri;
 
-    console.log(`[AUDIT] queueState.bugs.length: ${queueState.bugs.length}`);
-    console.log(`[AUDIT] queueState.initialTotalBugs: ${queueState.totalBugs}`);
-    console.log(`[AUDIT] queueState.currentIndex: ${queueState.currentIndex}`);
-
+    console.log("[AUDIT] queueState.isActive", queueState.isActive);
+    console.log("[AUDIT] queueState.bugs.length", queueState.bugs.length);
+    console.log("[AUDIT] summary popup reached");
     // Show Summary Popup
     const action = await vscode.window.showInformationMessage(
         `🔍 FULL FILE ANALYSIS COMPLETE\n\nTotal Bugs Found: ${queueState.totalBugs}\n\nSyntax: ${queueState.stats.syntax}\nRuntime: ${queueState.stats.runtime}\nLogic: ${queueState.stats.logic}\n\nReady to begin?`,
@@ -311,6 +314,7 @@ export async function startBugQueue(editor: vscode.TextEditor) {
 }
 
 export async function processCurrentBug() {
+    console.log("[AUDIT] processCurrentBug reached");
     if (!queueState.isActive) {
         return;
     }
