@@ -1,0 +1,91 @@
+{
+  "name": "zero-magic",
+  "displayName": "Zero-Magic Deconstruction Agent",
+  "description": "A Socratic deconstruction agent that replaces AI hand-holding with failing tests.",
+  "version": "0.0.1",
+  "publisher": "zero-magic-team",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "zeroMagic.triggerSocraticHelp",
+        "title": "Help me think (Zero-Magic)"
+      },
+      {
+        "command": "zeroMagic.renderSocraticDashboard",
+        "title": "Zero-Magic: Render Dashboard"
+      },
+      {
+        "command": "zeroMagic.analyzeWholeFile",
+        "title": "Zero-Magic: Analyze Whole File"
+      },
+      {
+        "command": "zeroMagic.inlineCoach.showSolution",
+        "title": "Zero-Magic: Show Solution"
+      },
+      {
+        "command": "zeroMagic.inlineCoach.hint",
+        "title": "Zero-Magic: Show Hint"
+      },
+      {
+        "command": "zeroMagic.inlineCoach.submit",
+        "title": "Zero-Magic: Submit Fix"
+      },
+      {
+        "command": "zeroMagic.inlineCoach.close",
+        "title": "Zero-Magic: Close Coach"
+      },
+      {
+        "command": "zeroMagic.sandbox.submit",
+        "title": "Zero-Magic: Submit Sandbox Fix"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "zeroMagic.analyzeWholeFile",
+        "key": "ctrl+alt+z",
+        "when": "editorFocus"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "zeroMagicSidebar",
+          "title": "Zero-Magic",
+          "icon": "$(lightbulb)"
+        }
+      ]
+    },
+    "views": {
+      "zeroMagicSidebar": [
+        {
+          "type": "webview",
+          "id": "zeroMagic.socraticSidebar",
+          "name": "Socratic Dashboard"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src --ext ts",
+    "test": "node ./out/test/runTest.js"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.80.0",
+    "@types/node": "18.x",
+    "typescript": "^5.1.3"
+  }
+}
