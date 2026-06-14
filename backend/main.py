@@ -27,7 +27,7 @@ env_path = os.path.join(os.path.dirname(__file__), ".env")
 load_dotenv(env_path)
 print("Groq API Key Loaded:", bool(os.environ.get("GROQ_API_KEY")))
 
-from backend.routers import missions_router
+from backend.routers import missions_router, sandbox_router
 
 
 # ---------------------------------------------------------------------------
@@ -121,6 +121,7 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 
 app.include_router(missions_router)
+app.include_router(sandbox_router)
 
 
 # ---------------------------------------------------------------------------

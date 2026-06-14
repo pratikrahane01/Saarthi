@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { Mission, executeMissionHandOff, matchErrorToMission } from './missions';
+import { Mission, matchErrorToMission } from './missions';
 import { showInlineFixCoach } from './watcher';
 
 export interface UnifiedFinding {
@@ -341,8 +341,9 @@ export async function processCurrentBug() {
     const mission = queueState.bugs[queueState.currentIndex];
     
     if (mission.tier === 3) {
-        // Tier 3: Open Dashboard
-        await executeMissionHandOff(mission);
+        // Tier 3: Open Sandbox (isolated controller — dynamic import to avoid T1/T2 bundle impact)
+        const { SandboxController } = await import('./tier3/sandboxController.js');
+        SandboxController.start(mission);
         return;
     }
 

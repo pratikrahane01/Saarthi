@@ -43,6 +43,10 @@
       {
         "command": "zeroMagic.inlineCoach.close",
         "title": "Zero-Magic: Close Coach"
+      },
+      {
+        "command": "zeroMagic.sandbox.submit",
+        "title": "Zero-Magic: Submit Sandbox Fix"
       }
     ],
     "keybindings": [
